@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 
 use chrono::Utc;
-use flare_proto::common::{ErrorCode as ProtoErrorCode, RpcStatus};
+use flare_proto::common::{ErrorCode as ProtoErrorCode, ErrorDetail, RpcStatus};
 
 use super::{ErrorCode, FlareError, LocalizedError};
 
@@ -15,6 +15,8 @@ use super::{ErrorCode, FlareError, LocalizedError};
 const DETAIL_KEY: &str = "detail";
 const FLARE_CODE_KEY: &str = "flare_code";
 const PARAM_PREFIX: &str = "param.";
+const DETAIL_DOMAIN: &str = "flare.core";
+const DETAIL_REASON_METADATA: &str = "metadata";
 
 /// 构造一个代表成功的 `RpcStatus`
 #[inline]
@@ -22,7 +24,8 @@ pub fn ok_status() -> RpcStatus {
     RpcStatus {
         code: ProtoErrorCode::Ok as i32,
         message: "OK".to_string(),
-        details: HashMap::new(),
+        details: Vec::new(),
+        context: None,
     }
 }
 
@@ -58,21 +61,33 @@ pub fn localized_to_rpc_status(
     details: Option<&String>,
     params: Option<&HashMap<String, String>>,
 ) -> RpcStatus {
-    let mut extra = HashMap::new();
-    if let Some(details) = details {
-        extra.insert(DETAIL_KEY.to_string(), details.clone());
-    }
+    let mut metadata = HashMap::new();
     if let Some(params) = params {
         for (key, value) in params {
-            extra.insert(format!("{PARAM_PREFIX}{key}"), value.clone());
+            metadata.insert(format!("{PARAM_PREFIX}{key}"), value.clone());
         }
     }
-    extra.insert(FLARE_CODE_KEY.to_string(), code.as_u32().to_string());
+    metadata.insert(FLARE_CODE_KEY.to_string(), code.as_u32().to_string());
+
+    let detail_message = details.cloned().unwrap_or_default();
+
+    let detail = if metadata.is_empty() && detail_message.is_empty() {
+        None
+    } else {
+        Some(ErrorDetail {
+            domain: DETAIL_DOMAIN.to_string(),
+            reason: DETAIL_REASON_METADATA.to_string(),
+            message: detail_message,
+            metadata,
+            detail: None,
+        })
+    };
 
     RpcStatus {
         code: map_error_code_to_proto(*code) as i32,
         message: reason.to_string(),
-        details: extra,
+        details: detail.into_iter().collect(),
+        context: None,
     }
 }
 
@@ -80,17 +95,29 @@ pub fn localized_to_rpc_status(
 pub fn from_rpc_status(status: &RpcStatus) -> FlareError {
     let proto_code = ProtoErrorCode::try_from(status.code).unwrap_or(ProtoErrorCode::Internal);
 
-    let flare_code = status
-        .details
+    let mut aggregated_metadata = HashMap::new();
+    let mut detail_message = None;
+    for detail in &status.details {
+        if detail.domain == DETAIL_DOMAIN {
+            if detail_message.is_none() && !detail.message.is_empty() {
+                detail_message = Some(detail.message.clone());
+            }
+            for (key, value) in &detail.metadata {
+                aggregated_metadata.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    let flare_code = aggregated_metadata
         .get(FLARE_CODE_KEY)
         .and_then(|value| value.parse::<u32>().ok())
         .and_then(ErrorCode::from_u32)
         .unwrap_or_else(|| map_proto_code_to_error(proto_code));
 
-    let details = status.details.get(DETAIL_KEY).cloned();
+    let details = detail_message
+        .or_else(|| aggregated_metadata.get(DETAIL_KEY).cloned());
 
-    let params: HashMap<String, String> = status
-        .details
+    let params: HashMap<String, String> = aggregated_metadata
         .iter()
         .filter_map(|(key, value)| {
             key.strip_prefix(PARAM_PREFIX)
@@ -117,14 +144,29 @@ pub fn from_rpc_status(status: &RpcStatus) -> FlareError {
 pub fn map_proto_code_to_error(proto: ProtoErrorCode) -> ErrorCode {
     match proto {
         ProtoErrorCode::InvalidArgument => ErrorCode::InvalidParameter,
+        ProtoErrorCode::FailedPrecondition => ErrorCode::OperationFailed,
+        ProtoErrorCode::OutOfRange => ErrorCode::InvalidParameter,
+        ProtoErrorCode::UnsupportedOperation => ErrorCode::OperationNotSupported,
         ProtoErrorCode::Unauthenticated => ErrorCode::AuthenticationFailed,
         ProtoErrorCode::PermissionDenied => ErrorCode::PermissionDenied,
+        ProtoErrorCode::TokenExpired => ErrorCode::TokenExpired,
+        ProtoErrorCode::TokenRevoked => ErrorCode::AuthenticationInvalid,
         ProtoErrorCode::NotFound => ErrorCode::UserNotFound,
+        ProtoErrorCode::AlreadyExists => ErrorCode::OperationFailed,
         ProtoErrorCode::Conflict => ErrorCode::OperationFailed,
+        ProtoErrorCode::ResourceExhausted | ProtoErrorCode::QuotaExceeded => {
+            ErrorCode::ResourceExhausted
+        }
         ProtoErrorCode::RateLimited => ErrorCode::ResourceExhausted,
+        ProtoErrorCode::SlowDown | ProtoErrorCode::BackoffRequired => ErrorCode::ResourceExhausted,
+        ProtoErrorCode::InProgress => ErrorCode::OperationFailed,
+        ProtoErrorCode::NeedsRetry => ErrorCode::ResourceExhausted,
         ProtoErrorCode::Unavailable => ErrorCode::ServiceUnavailable,
         ProtoErrorCode::Timeout => ErrorCode::OperationTimeout,
         ProtoErrorCode::Ok => ErrorCode::GeneralError,
+        ProtoErrorCode::DataLoss => ErrorCode::InternalError,
+        ProtoErrorCode::NotImplemented => ErrorCode::OperationNotSupported,
+        ProtoErrorCode::Cancelled => ErrorCode::OperationFailed,
         ProtoErrorCode::Unspecified | ProtoErrorCode::Internal => ErrorCode::InternalError,
     }
 }
@@ -159,6 +201,10 @@ pub fn map_error_code_to_proto(code: ErrorCode) -> ProtoErrorCode {
 
         ConnectionTimeout | NetworkTimeout | OperationTimeout => ProtoErrorCode::Timeout,
 
+        OperationNotSupported => ProtoErrorCode::UnsupportedOperation,
+        OperationFailed => ProtoErrorCode::Conflict,
+        OperationTimeout => ProtoErrorCode::Timeout,
+        UnknownError | GeneralError => ProtoErrorCode::Internal,
         _ => ProtoErrorCode::Internal,
     }
 }
