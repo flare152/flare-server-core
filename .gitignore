@@ -4,3 +4,6 @@
 .git
 target
 Cargo.lock
+
+.idea/
+.vscode/

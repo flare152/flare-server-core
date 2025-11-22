@@ -203,7 +203,7 @@ pub fn map_error_code_to_proto(code: ErrorCode) -> ProtoErrorCode {
 
         OperationNotSupported => ProtoErrorCode::UnsupportedOperation,
         OperationFailed => ProtoErrorCode::Conflict,
-        OperationTimeout => ProtoErrorCode::Timeout,
+        // OperationTimeout 已在上面处理，这里移除重复匹配
         UnknownError | GeneralError => ProtoErrorCode::Internal,
         _ => ProtoErrorCode::Internal,
     }

@@ -56,6 +56,17 @@ etcd-client = "0.17"
 # HTTP 客户端（用于 Consul）
 reqwest = { version = "0.12", features = ["json"] }
 
+# 服务发现和广播
+async-broadcast = "0.7"
+futures = "0.3"
+futures-util = "0.3"
+
+# 随机数生成（用于负载均衡）
+rand = "0.8"
+
+# Kafka 客户端（可选，用于消息队列）
+rdkafka = { version = "0.38", optional = true }
+
 # 指标收集（可选）
 prometheus = { version = "0.14", optional = true }
 
@@ -70,3 +81,6 @@ jsonwebtoken = { version = "10", default-features = false, features = ["rust_cry
 default = []
 metrics = ["prometheus"]
 tracing = ["opentelemetry", "opentelemetry-otlp", "opentelemetry_sdk"]
+tower = ["tower/discover", "tower/balance"]
+kafka = ["rdkafka"]
+discovery = []

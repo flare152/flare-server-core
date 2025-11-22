@@ -27,7 +27,8 @@ where
     fn layer(&self, service: S) -> Self::Service {
         // TODO: 实现真正的并发限制
         // 可以使用 tokio::sync::Semaphore 或其他机制
-        let _ = self.max_concurrent;
+        // 当前仅作为占位符，保留 max_concurrent 参数用于未来实现
+        let _max_concurrent = self.max_concurrent;
         service
     }
 }

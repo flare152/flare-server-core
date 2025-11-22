@@ -39,6 +39,14 @@ pub struct RegistryConfig {
     pub endpoints: Vec<String>,
     pub namespace: String,
     pub ttl: u64,
+    /// 负载均衡策略：round_robin, random, consistent_hash, least_connections
+    /// 默认：consistent_hash
+    #[serde(default = "default_load_balance_strategy")]
+    pub load_balance_strategy: String,
+}
+
+fn default_load_balance_strategy() -> String {
+    "consistent_hash".to_string()
 }
 
 fn default_registry_type() -> String {
