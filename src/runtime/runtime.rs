@@ -335,7 +335,7 @@ impl ServiceRuntime {
     /// * `task_fn` - 任务函数，接收 shutdown_rx，返回 Future
     ///
     /// 注意：此方法内部使用 `SpawnTask::with_shutdown`，功能相同
-    pub fn add_custom_task<F, Fut>(mut self, name: impl Into<String>, task_fn: F) -> Self
+    pub fn add_custom_task<F, Fut>(self, name: impl Into<String>, task_fn: F) -> Self
     where
         F: FnOnce(tokio::sync::oneshot::Receiver<()>) -> Fut + Send + 'static,
         Fut: Future<Output = crate::runtime::task::TaskResult> + Send + 'static,

@@ -14,7 +14,7 @@ pub struct ConsulBackend {
     http_client: Arc<HttpClient>,
     consul_url: String,
     /// 默认命名空间（用于 unregister 等操作）
-    default_namespace: String,
+    _default_namespace: String,
 }
 
 impl ConsulBackend {
@@ -34,7 +34,7 @@ impl ConsulBackend {
         Ok(Self {
             http_client: Arc::new(HttpClient::new()),
             consul_url,
-            default_namespace,
+            _default_namespace: default_namespace,
         })
     }
 
@@ -291,4 +291,3 @@ impl DiscoveryBackend for ConsulBackend {
         Ok(rx)
     }
 }
-
