@@ -9,6 +9,7 @@ pub mod conversions;
 pub mod flare_error;
 pub mod grpc;
 pub mod localized;
+#[cfg(feature = "proto")]
 pub mod proto;
 
 // 重新导出公共类型和函数
@@ -17,6 +18,7 @@ pub use code::{ErrorCategory, ErrorCode};
 pub use flare_error::{FlareError, Result, ServerError};
 pub use grpc::{GrpcError, GrpcErrorExt, GrpcResult};
 pub use localized::LocalizedError;
+#[cfg(feature = "proto")]
 pub use proto::{
     from_rpc_status, localized_to_rpc_status, map_error_code_to_proto, map_proto_code_to_error,
     ok_status, to_localized, to_rpc_status,

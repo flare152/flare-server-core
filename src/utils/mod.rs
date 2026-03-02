@@ -19,8 +19,11 @@ pub fn extract_trace_id<T>(req: &Request<T>) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// 提取请求ID
-pub fn extract_request_id<T>(req: &Request<T>) -> Option<String> {
+/// 提取请求ID（从 metadata 中，低级别 API）
+/// 
+/// 注意：推荐使用 `middleware::extract_request_id`，它从 RequestContext 中提取
+#[deprecated(note = "Use middleware::extract_request_id instead")]
+pub fn extract_request_id_from_metadata<T>(req: &Request<T>) -> Option<String> {
     req.metadata()
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())

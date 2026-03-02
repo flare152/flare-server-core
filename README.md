@@ -2,9 +2,55 @@
 
 Flare IM Server Core Library - 为 Flare IM Server 提供完整的 gRPC 基础设施，包括拦截器、中间件、错误处理、服务发现等。
 
+## 🎯 设计原则
+
+- **最小依赖**：核心功能不依赖业务特定的 proto 定义，保持基础库的独立性和通用性
+- **可选集成**：通过 feature flag 提供与 `flare-proto` 的可选转换支持
+- **类型安全**：使用 Rust 原生类型定义上下文，提供清晰的 API
+
+---
+
+## ⚙️ Features（按需引入）
+
+| Feature     | 说明 | 引入方示例 |
+|------------|------|-------------|
+| `default`  | 无额外依赖 | - |
+| `proto`    | flare-proto 错误/上下文转换 | flare-im-core、各服务 |
+| `kafka`    | event_bus Kafka 传输 + TopicEventBus 后端 | storage-writer、orchestrator、push、conversation |
+| `discovery`| 占位（当前 discovery 始终编译） | signaling-gateway 等 |
+| `metrics`  | Prometheus | 按需 |
+| `tracing`  | OpenTelemetry | 按需 |
+| `tower`    | tower discover/balance | 按需 |
+
+在业务 workspace 中：`flare-server-core = { workspace = true, features = ["proto"] }` 为基座，需要 Kafka 时加 `features = ["proto", "kafka"]`。
+
 ---
 
 ## 📚 功能模块
+
+### 上下文系统（Context）
+
+提供独立的上下文类型系统，用于在多租户环境中传递请求上下文。**不依赖 `flare-proto`**，使用标准 Rust 类型。
+
+**核心类型**：
+- `TenantContext`：租户上下文（多租户隔离）
+- `RequestContext`：请求上下文（追踪、操作者、设备信息）
+- `ActorContext`：操作者上下文（权限校验）
+- `TraceContext`：追踪上下文（分布式追踪）
+- `DeviceContext`：设备上下文（设备信息）
+
+**中间件**：
+- `TenantLayer`：自动提取和注入租户上下文
+- `RequestContextLayer`：自动提取和注入请求上下文
+
+**客户端工具**：
+- `set_tenant_context`、`set_request_context`：手动设置上下文
+- `RequestBuilder`：链式 API 构建请求
+- `ClientContextInterceptor`：自动为所有请求添加上下文
+
+详细使用说明请参考 [上下文使用指南](README_CONTEXT.md)。
+
+---
 
 ### 1. **错误处理** (`error`)
 

@@ -6,9 +6,11 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
+#[cfg(feature = "proto")]
 use chrono::Utc;
+#[cfg(feature = "proto")]
 use flare_proto::common::{ErrorCode as ProtoErrorCode, ErrorDetail, RpcStatus};
-
+#[cfg(feature = "proto")]
 use super::{ErrorCode, FlareError, LocalizedError};
 
 /// metadata 中用于存放原始 Flare 错误码的键

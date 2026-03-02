@@ -1,6 +1,57 @@
 //! gRPC 客户端模块
 //!
-//! 提供客户端构建器和配置
+//! 提供客户端构建器、Context 集成和拦截器
+//!
+//! # 设计理念
+//!
+//! 统一使用 `Context` 系统处理所有上下文信息，通过 `metadata_codec` 统一编解码，
+//! 性能最优，代码最简洁。
+//!
+//! # 使用示例
+//!
+//! ## 方式 1：使用拦截器（推荐）
+//!
+//! ```rust,no_run
+//! use flare_server_core::client::{ClientContextInterceptor, ClientContextConfig};
+//! use flare_server_core::context::TenantContext;
+//!
+//! let config = ClientContextConfig::new()
+//!     .with_default_tenant(TenantContext::new("tenant-123"));
+//! let interceptor = ClientContextInterceptor::new(config);
+//! let client = YourServiceClient::with_interceptor(channel, interceptor);
+//! ```
+//!
+//! ## 方式 2：手动设置 Context
+//!
+//! ```rust,no_run
+//! use flare_server_core::client::set_context_metadata;
+//! use flare_server_core::context::Context;
+//!
+//! let ctx = Context::root().with_tenant_id("tenant-123");
+//! let mut request = Request::new(my_request);
+//! set_context_metadata(&mut request, &ctx);
+//! ```
+
+pub mod metadata_codec;
+pub mod interceptor;
+pub mod context;
+
+// 核心编解码功能
+pub use metadata_codec::{
+    encode_context_to_metadata, decode_context_from_metadata,
+};
+
+// 拦截器
+pub use interceptor::{
+    ClientContextInterceptor, ClientContextConfig,
+    default_context_interceptor, context_interceptor_with_tenant,
+    context_interceptor_with_tenant_and_user,
+};
+
+// Context 集成
+pub use context::{
+    set_context_metadata, request_with_context,
+};
 
 use crate::error::Result;
 use std::time::Duration;

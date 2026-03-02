@@ -17,6 +17,22 @@ use crate::discovery::instance::ServiceInstance;
 use crate::discovery::backend::DiscoveryBackend;
 use crate::discovery::config::{DiscoveryConfig, TagFilter};
 
+/// 将配置中的 tag_filters 转为 backend.discover() 所需的 HashMap。
+/// 仅包含 value 存在的过滤器（精确匹配）。
+fn tag_filters_to_map(config: &DiscoveryConfig) -> Option<HashMap<String, String>> {
+    let mut m = HashMap::new();
+    for f in &config.tag_filters {
+        if let Some(v) = &f.value {
+            m.insert(f.key.clone(), v.clone());
+        }
+    }
+    if m.is_empty() {
+        None
+    } else {
+        Some(m)
+    }
+}
+
 /// Channel 服务包装器
 /// 
 /// 实现 tower::Service trait，用于与 tower::balance 集成
@@ -149,9 +165,12 @@ impl ServiceDiscover {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        
-        // 立即执行一次服务发现
-        if let Ok(new_instances) = backend.discover(&service_type, None, None, None).await {
+        let tags_ref = tag_filters_to_map(&config);
+        let namespace = config.namespace.as_ref().and_then(|n| n.default.as_deref());
+        let version = config.version.as_ref().and_then(|v| v.default.as_deref());
+
+        // 立即执行一次服务发现（传入 tag_filters，以便发现带 svid 等标签的实例）
+        if let Ok(new_instances) = backend.discover(&service_type, namespace, version, tags_ref.as_ref()).await {
             for new_inst in new_instances {
                 let id = new_inst.instance_id.clone();
                 // 创建 Channel 并缓存
@@ -189,11 +208,19 @@ impl ServiceDiscover {
         let backend_clone = backend.clone();
         let updater_clone = updater.clone();
         let service_type_clone = service_type.clone();
-        
+        let tags_ref = tag_filters_to_map(&config);
+        let tags_immediate = tags_ref.clone();
+        let namespace = config.namespace.as_ref().and_then(|n| n.default.as_deref()).map(String::from);
+        let version = config.version.as_ref().and_then(|v| v.default.as_deref()).map(String::from);
+        let namespace_immediate = namespace.clone();
+        let version_immediate = version.clone();
+
         // 立即执行一次服务发现，不等待第一次 interval
         tokio::spawn(async move {
-            // 立即执行一次服务发现
-            if let Ok(new_instances) = backend_clone.discover(&service_type_clone, None, None, None).await {
+            // 立即执行一次服务发现（传入 tag_filters）
+            let ns = namespace_immediate.as_deref();
+            let ver = version_immediate.as_deref();
+            if let Ok(new_instances) = backend_clone.discover(&service_type_clone, ns, ver, tags_immediate.as_ref()).await {
                 let mut current = instances_immediate.write().await;
                 let new_map: HashMap<String, ServiceInstance> = new_instances
                     .into_iter()
@@ -213,6 +240,9 @@ impl ServiceDiscover {
             }
         });
         
+        let tags_interval = tags_ref.clone();
+        let namespace_interval = namespace.clone();
+        let version_interval = version.clone();
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(tokio::time::Duration::from_secs(interval));
             // 跳过第一次 tick，因为我们已经立即执行了一次
@@ -220,8 +250,9 @@ impl ServiceDiscover {
             
             loop {
                 interval_timer.tick().await;
-                
-                match backend.discover(&service_type, None, None, None).await {
+                let ns = namespace_interval.as_deref();
+                let ver = version_interval.as_deref();
+                match backend.discover(&service_type, ns, ver, tags_interval.as_ref()).await {
                     Ok(new_instances) => {
                         let mut current = instances_interval.write().await;
                         let new_map: HashMap<String, ServiceInstance> = new_instances

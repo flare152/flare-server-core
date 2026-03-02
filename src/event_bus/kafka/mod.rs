@@ -1,8 +1,6 @@
-//! Kafka 工具模块
+//! Kafka 传输层：通用生产者/消费者构建与事件总线 Kafka 后端共用
 //!
-//! 提供通用的 Kafka 消费者和生产者构建工具
-//!
-//! 此模块需要启用 `kafka` feature 才能使用
+//! 启用 `kafka` feature 时可用。事件总线 Kafka 实现（TopicEventBus）位于 `backend::kafka`。
 
 #[cfg(feature = "kafka")]
 pub mod consumer_config;
@@ -21,4 +19,3 @@ pub use consumer_builder::{build_kafka_consumer, subscribe_and_wait_for_assignme
 pub use producer_config::KafkaProducerConfig;
 #[cfg(feature = "kafka")]
 pub use producer_builder::build_kafka_producer;
-

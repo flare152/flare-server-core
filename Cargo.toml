@@ -26,11 +26,13 @@ tokio-stream = "0.1"
 tonic = "0.14"
 prost = "0.14"
 prost-types = "0.14"
+http = "1.0"
 
 # 序列化
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
+base64 = "0.22"
 
 # 错误处理
 thiserror = "2.0"
@@ -45,15 +47,15 @@ chrono = { version = "0.4", features = ["serde", "clock"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 anyhow = "1"
-flare-proto = { path = "../flare-proto" }
+flare-proto = { path = "../flare-proto", optional = true }
 
-# Service Mesh 和
-tower = "0.5"
+# Service Mesh 和中间件（timeout 为 TimeoutLayer 所需）
+tower = { version = "0.5", features = ["timeout"] }
 
-# etcd 客户端
+# etcd 客户端（服务发现 etcd 后端）
 etcd-client = "0.17"
 
-# HTTP 客户端（用于 Consul）
+# HTTP 客户端（服务发现 Consul 后端）
 reqwest = { version = "0.12", features = ["json"] }
 
 # 服务发现和广播
@@ -79,8 +81,14 @@ jsonwebtoken = { version = "10", default-features = false, features = ["rust_cry
 
 [features]
 default = []
+# 与 flare-proto 的错误/上下文转换（im-core 等需要）
+proto = ["flare-proto"]
+# Kafka：event_bus 通用生产者/消费者 + TopicEventBus 后端（storage-writer / orchestrator / push / conversation 等）
+kafka = ["rdkafka"]
+# 服务发现（占位，当前 discovery 始终编译；可按需用于条件编译或文档）
+discovery = []
+# 指标：Prometheus 集成
 metrics = ["prometheus"]
+# 分布式追踪：OpenTelemetry
 tracing = ["opentelemetry", "opentelemetry-otlp", "opentelemetry_sdk"]
 tower = ["tower/discover", "tower/balance"]
-kafka = ["rdkafka"]
-discovery = []

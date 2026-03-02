@@ -8,6 +8,8 @@ use reqwest::Client as HttpClient;
 use crate::discovery::{
     DiscoveryBackend, DiscoveryConfig, ServiceInstance,
 };
+use crate::kv::{KvBackend, KvEntry, KvError};
+use base64::Engine;
 
 /// Consul 服务发现后端
 pub struct ConsulBackend {
@@ -51,6 +53,138 @@ impl ConsulBackend {
 }
 
 #[async_trait]
+impl KvBackend for ConsulBackend {
+    /// 获取键值
+    async fn get(&self, key: &str) -> Result<Option<KvEntry>, KvError> {
+        let url = format!("{}/v1/kv/{}", self.consul_url, key.trim_start_matches('/'));
+        
+        match self.http_client.get(&url).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    let body: Vec<serde_json::Value> = response.json().await
+                        .map_err(|e| KvError::OperationFailed(format!("Failed to parse consul response: {}", e)))?;
+                    
+                    if let Some(first) = body.first() {
+                        // 从响应中提取Value字段并进行base64解码
+                        if let Some(value_base64) = first.get("Value").and_then(|v| v.as_str()) {
+                            // base64解码
+                            let value_bytes = base64::engine::general_purpose::STANDARD.decode(value_base64)
+                                .map_err(|e| KvError::OperationFailed(format!("Failed to decode base64 value from consul: {}", e)))?;
+                            
+                            let entry = KvEntry {
+                                key: first.get("Key").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                value: value_bytes,
+                                version: first.get("Version").and_then(|v| v.as_u64()).unwrap_or(0),
+                                create_revision: first.get("CreateIndex").and_then(|v| v.as_u64()).unwrap_or(0),
+                                mod_revision: first.get("ModifyIndex").and_then(|v| v.as_u64()).unwrap_or(0),
+                                lease: first.get("Lease").and_then(|v| v.as_i64()).unwrap_or(0),
+                            };
+                            
+                            Ok(Some(entry))
+                        } else {
+                            Err(KvError::KeyNotFound(key.to_string()))
+                        }
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Err(KvError::OperationFailed(format!("Failed to get key from consul, status: {}", response.status())))
+                }
+            }
+            Err(e) => {
+                Err(KvError::OperationFailed(format!("Failed to get key from consul: {}", e)))
+            }
+        }
+    }
+    
+    /// 获取多个键值
+    async fn get_range(&self, key: &str, _range_end: &str) -> Result<Vec<KvEntry>, KvError> {
+        // Consul 不直接支持范围查询，我们可以通过前缀查询来模拟
+        let keys = self.prefix_keys(key).await?;
+        let mut entries = Vec::new();
+        for k in keys {
+            let k_owned = k.clone();
+            if let Some(entry) = self.get(&k_owned).await? {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+    
+    /// 设置键值
+    async fn put(&self, key: &str, value: &[u8]) -> Result<(), KvError> {
+        let url = format!("{}/v1/kv/{}", self.consul_url, key.trim_start_matches('/'));
+        let value_base64 = base64::engine::general_purpose::STANDARD.encode(value);
+        
+        match self.http_client.put(&url).body(value_base64).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    Ok(())
+                } else {
+                    Err(KvError::OperationFailed(format!("Failed to put key to consul, status: {}", response.status())))
+                }
+            }
+            Err(e) => {
+                Err(KvError::OperationFailed(format!("Failed to put key to consul: {}", e)))
+            }
+        }
+    }
+    
+    /// 删除键
+    async fn delete(&self, key: &str) -> Result<bool, KvError> {
+        let url = format!("{}/v1/kv/{}", self.consul_url, key.trim_start_matches('/'));
+        
+        match self.http_client.delete(&url).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    Ok(true)
+                } else {
+                    Err(KvError::OperationFailed(format!("Failed to delete key from consul, status: {}", response.status())))
+                }
+            }
+            Err(e) => {
+                Err(KvError::OperationFailed(format!("Failed to delete key from consul: {}", e)))
+            }
+        }
+    }
+    
+    /// 删除范围内的键
+    async fn delete_range(&self, key: &str, _range_end: &str) -> Result<u64, KvError> {
+        // Consul 不直接支持范围删除，我们可以通过前缀查询来模拟
+        let keys = self.prefix_keys(key).await?;
+        let mut count = 0u64;
+        
+        for k in keys {
+            if self.delete(&k).await? {
+                count += 1;
+            }
+        }
+        
+        Ok(count)
+    }
+    
+    /// 获取键的前缀列表
+    async fn prefix_keys(&self, prefix: &str) -> Result<Vec<String>, KvError> {
+        let url = format!("{}/v1/kv/{}?keys", self.consul_url, prefix.trim_start_matches('/'));
+        
+        match self.http_client.get(&url).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    let keys: Vec<String> = response.json().await
+                        .map_err(|e| KvError::OperationFailed(format!("Failed to parse consul response: {}", e)))?;
+                    Ok(keys)
+                } else {
+                    Err(KvError::OperationFailed(format!("Failed to get prefix keys from consul, status: {}", response.status())))
+                }
+            }
+            Err(e) => {
+                Err(KvError::OperationFailed(format!("Failed to get prefix keys from consul: {}", e)))
+            }
+        }
+    }
+}
+
+#[async_trait]
 impl DiscoveryBackend for ConsulBackend {
     async fn discover(
         &self,
@@ -74,7 +208,38 @@ impl DiscoveryBackend for ConsulBackend {
             .send()
             .await?;
         
-        let services: Vec<serde_json::Value> = resp.json().await?;
+        // 记录响应状态和原始内容（用于调试）
+        let status = resp.status();
+        let resp_text = resp.text().await
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+        
+        tracing::debug!(
+            service_type = %service_type,
+            url = %url,
+            status = %status,
+            response_len = resp_text.len(),
+            tag_filters = ?tags,
+            "Consul service discovery response"
+        );
+        
+        // 解析 JSON
+        let services: Vec<serde_json::Value> = serde_json::from_str(&resp_text)
+            .map_err(|e| {
+                tracing::error!(
+                    service_type = %service_type,
+                    error = %e,
+                    response_preview = %resp_text.chars().take(500).collect::<String>(),
+                    "Failed to parse Consul response as JSON"
+                );
+                format!("error decoding response body: {} (response preview: {})", e, resp_text.chars().take(200).collect::<String>())
+            })?;
+        
+        let total_services_count = services.len();
+        tracing::debug!(
+            service_type = %service_type,
+            services_count = total_services_count,
+            "Parsed Consul services"
+        );
         
         let mut instances = Vec::new();
         for svc in services {
@@ -114,9 +279,26 @@ impl DiscoveryBackend for ConsulBackend {
                 }
             }
             
+            // 记录实例的标签信息（用于调试）
+            let instance_tags: Vec<String> = instance.tags.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            tracing::debug!(
+                service_type = %service_type,
+                instance_id = %instance.instance_id,
+                address = %instance.address,
+                tags = ?instance_tags,
+                "Found service instance from Consul"
+            );
+            
             // 过滤命名空间
             if let Some(ns) = namespace {
                 if !instance.matches_namespace(Some(ns)) {
+                    tracing::debug!(
+                        instance_id = %instance.instance_id,
+                        namespace = %ns,
+                        "Instance filtered out by namespace"
+                    );
                     continue;
                 }
             }
@@ -124,19 +306,48 @@ impl DiscoveryBackend for ConsulBackend {
             // 过滤版本
             if let Some(ver) = version {
                 if !instance.matches_version(Some(ver)) {
+                    tracing::debug!(
+                        instance_id = %instance.instance_id,
+                        version = %ver,
+                        "Instance filtered out by version"
+                    );
                     continue;
                 }
             }
             
             // 过滤标签
             if let Some(tag_filters) = tags {
+                let tag_filter_str: Vec<String> = tag_filters.iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect();
                 if !instance.matches_tags(tag_filters) {
+                    tracing::debug!(
+                        instance_id = %instance.instance_id,
+                        instance_tags = ?instance_tags,
+                        required_tags = ?tag_filter_str,
+                        "Instance filtered out by tag filters"
+                    );
                     continue;
+                } else {
+                    tracing::debug!(
+                        instance_id = %instance.instance_id,
+                        instance_tags = ?instance_tags,
+                        required_tags = ?tag_filter_str,
+                        "Instance passed tag filters"
+                    );
                 }
             }
             
             instances.push(instance);
         }
+        
+        tracing::info!(
+            service_type = %service_type,
+            total_found = total_services_count,
+            filtered_count = instances.len(),
+            tag_filters = ?tags,
+            "Consul service discovery completed"
+        );
         
         Ok(instances)
     }
