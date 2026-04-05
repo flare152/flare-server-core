@@ -1,0 +1,44 @@
+[package]
+name = "flare-core-base"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Flare Core Base - 基础类型和工具"
+repository.workspace = true
+
+[features]
+default = []
+# 供 `check-cfg` 与可选 Protobuf/错误桥接路径使用（与 tonic/grpc 集成解耦）
+proto = []
+
+[dependencies]
+# 异步运行时
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# gRPC (用于错误转换)
+tonic = { workspace = true }
+
+# 序列化
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# 错误处理
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# 日志
+tracing = { workspace = true }
+
+# 工具
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# 存储 (用于错误转换)
+redis = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

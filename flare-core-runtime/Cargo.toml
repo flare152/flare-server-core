@@ -1,0 +1,42 @@
+[package]
+name = "flare-core-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Flare Core Runtime - 运行时层"
+repository.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+# 内部依赖
+flare-core-base = { workspace = true }
+
+# 异步运行时
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+
+# 序列化
+serde = { workspace = true }
+
+# 错误处理
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# 异步 trait 支持
+async-trait = { workspace = true }
+
+# 日志追踪
+tracing = { workspace = true }
+
+# 工具
+chrono = { workspace = true }
+uuid = { workspace = true }
+num_cpus = "1.16"
+
+[dev-dependencies]
+tokio-test = "0.4"

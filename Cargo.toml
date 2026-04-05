@@ -1,94 +1,143 @@
-[package]
-name = "flare-server-core"
-version = "0.1.0"
+[workspace]
+members = [
+    "flare-core-base",
+    "flare-core-transport",
+    "flare-core-infra",
+    "flare-core-messaging",
+    "flare-core-runtime",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94.0"
 authors = ["Flare Team"]
 license = "MIT"
-description = "Flare IM Server Core Library - Complete gRPC infrastructure for server-side including interceptors, middleware, error handling, service discovery, etc."
 repository = "https://github.com/flare-im/flare-im"
 homepage = "https://github.com/flare-im/flare-im"
-documentation = "https://docs.rs/flare-server-core"
-readme = "README.md"
-exclude = [
-    "target/",
-    "Cargo.lock",
-    "*.md",
-    "!README.md",
-]
 
-[dependencies]
-# 异步运行时
+[workspace.dependencies]
+# ===== 异步运行时 =====
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+tokio-util = "0.7"
+futures = "0.3"
+futures-util = "0.3"
 
-# gRPC
+# ===== gRPC =====
 tonic = "0.14"
 prost = "0.14"
 prost-types = "0.14"
-http = "1.0"
 
-# 序列化
+# ===== HTTP =====
+axum = "0.8"
+tower = { version = "0.5", features = ["timeout", "discover", "balance"] }
+tower-http = "0.6"
+http = "1.0"
+bytes = "1"
+
+# ===== 序列化 =====
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
 base64 = "0.22"
 
-# 错误处理
+# ===== 错误处理 =====
 thiserror = "2.0"
+anyhow = "1"
 
-# 日志和追踪
+# ===== 日志追踪 =====
 tracing = "0.1"
+tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
-# 工具
+# ===== 工具 =====
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
-redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
-anyhow = "1"
-flare-proto = { path = "../flare-proto", optional = true }
-
-# Service Mesh 和中间件（timeout 为 TimeoutLayer 所需）
-tower = { version = "0.5", features = ["timeout"] }
-
-# etcd 客户端（服务发现 etcd 后端）
-etcd-client = "0.17"
-
-# HTTP 客户端（服务发现 Consul 后端）
-reqwest = { version = "0.12", features = ["json"] }
-
-# 服务发现和广播
 async-broadcast = "0.7"
-futures = "0.3"
-futures-util = "0.3"
-
-# 随机数生成（用于负载均衡）
 rand = "0.8"
 
-# Kafka 客户端（可选，用于消息队列）
-rdkafka = { version = "0.38", optional = true }
+# ===== 服务发现 =====
+etcd-client = "0.17"
+reqwest = { version = "0.12", features = ["json"] }
 
-# 指标收集（可选）
-prometheus = { version = "0.14", optional = true }
+# ===== 存储 =====
+redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 
-# OpenTelemetry（可选）
-opentelemetry = { version = "0.31", optional = true }
-opentelemetry-otlp = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", optional = true }
-
+# ===== 认证 =====
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 
+# ===== 消息队列 =====
+rdkafka = { version = "0.38" }
+
+# ===== 指标 =====
+prometheus = "0.14"
+
+# ===== OpenTelemetry =====
+opentelemetry = "0.31"
+opentelemetry-otlp = "0.31"
+opentelemetry_sdk = "0.31"
+
+# ===== 内部 crate =====
+flare-core-base = { path = "flare-core-base" }
+flare-core-transport = { path = "flare-core-transport" }
+flare-core-infra = { path = "flare-core-infra" }
+flare-core-messaging = { path = "flare-core-messaging" }
+flare-core-runtime = { path = "flare-core-runtime" }
+
+# ===== Proto =====
+flare-proto = { path = "../flare-proto" }
+
+[package]
+name = "flare-server-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Flare IM Server Core Library - Complete infrastructure for IM server including gRPC, HTTP, MQ, and more."
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/flare-server-core"
+readme = "README.md"
+
+[lib]
+name = "flare_server_core"
+path = "src/lib.rs"
+
 [features]
+# 默认功能
 default = []
-# 与 flare-proto 的错误/上下文转换（im-core 等需要）
-proto = ["flare-proto"]
-# Kafka：event_bus 通用生产者/消费者 + TopicEventBus 后端（storage-writer / orchestrator / push / conversation 等）
-kafka = ["rdkafka"]
-# 服务发现（占位，当前 discovery 始终编译；可按需用于条件编译或文档）
-discovery = []
-# 指标：Prometheus 集成
-metrics = ["prometheus"]
-# 分布式追踪：OpenTelemetry
-tracing = ["opentelemetry", "opentelemetry-otlp", "opentelemetry_sdk"]
-tower = ["tower/discover", "tower/balance"]
+
+# 传输层功能
+http = ["flare-core-transport/http"]
+grpc = ["flare-core-transport/grpc"]
+discovery = ["flare-core-transport/discovery"]
+
+# 消息队列功能
+kafka = ["flare-core-messaging/kafka"]
+nats = ["flare-core-messaging/nats"]
+
+# 基础设施功能
+kv = ["flare-core-infra/kv"]
+auth = ["flare-core-infra/auth"]
+telemetry = ["flare-core-infra/telemetry"]
+
+# Proto 支持
+proto = []
+
+# 完整功能
+full = ["http", "grpc", "discovery", "kafka", "kv", "auth", "telemetry", "proto"]
+
+[dependencies]
+# 内部 crate
+flare-core-base = { workspace = true }
+flare-core-transport = { workspace = true }
+flare-core-infra = { workspace = true }
+flare-core-messaging = { workspace = true }
+flare-core-runtime = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

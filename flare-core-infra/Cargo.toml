@@ -1,0 +1,70 @@
+[package]
+name = "flare-core-infra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Flare Core Infrastructure - 基础设施层 (KV + Auth + Telemetry)"
+repository.workspace = true
+
+[features]
+# 默认功能
+default = ["kv", "auth", "telemetry"]
+
+# KV 存储
+kv = []
+
+# 认证
+auth = []
+
+# 可观测性
+telemetry = ["tracing", "metrics"]
+tracing = []
+metrics = []
+
+[dependencies]
+# ===== 内部依赖 =====
+flare-core-base = { workspace = true }
+
+# ===== 异步运行时 =====
+tokio = { workspace = true }
+
+# ===== 序列化 =====
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# ===== 错误处理 =====
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# ===== 工具 =====
+async-trait = { workspace = true }
+tonic = { workspace = true }
+
+# ===== 日志追踪 =====
+tracing = { workspace = true }
+tracing-log = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# ===== 工具 =====
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# ===== KV 存储 =====
+etcd-client = { workspace = true }
+redis = { workspace = true }
+
+# ===== 认证 =====
+jsonwebtoken = { workspace = true }
+
+# ===== 指标 (可选) =====
+prometheus = { workspace = true, optional = true }
+
+# ===== OpenTelemetry (可选) =====
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

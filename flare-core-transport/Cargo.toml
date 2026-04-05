@@ -1,0 +1,70 @@
+[package]
+name = "flare-core-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Flare Core Transport - 传输层 (gRPC + HTTP + Discovery)"
+repository.workspace = true
+
+[features]
+# 默认功能: 空的,按需启用
+default = []
+
+# gRPC 支持 (可选)
+grpc = ["dep:tonic", "dep:prost"]
+
+# gRPC 拦截器 / 中间件扩展路径（check-cfg）
+grpc-interceptor = []
+grpc-middleware = []
+
+# HTTP 支持 (可选)
+http = ["dep:axum", "dep:tower-http"]
+
+# 服务发现 (可选)
+discovery = ["dep:etcd-client", "dep:reqwest", "dep:tonic"]
+
+# Proto 支持
+proto = []
+
+[dependencies]
+# ===== 内部依赖 =====
+flare-core-base = { workspace = true }
+flare-core-infra = { workspace = true }
+flare-core-runtime = { workspace = true }
+
+# ===== 异步运行时 (通用) =====
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+
+# ===== gRPC (可选) =====
+tonic = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+tower = { workspace = true }
+
+# ===== HTTP (可选) =====
+axum = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+http = { workspace = true }
+
+# ===== 序列化 (通用) =====
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# ===== 日志追踪 (通用) =====
+tracing = { workspace = true }
+
+# ===== 工具 (通用) =====
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+
+# ===== 服务发现 (可选) =====
+etcd-client = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
