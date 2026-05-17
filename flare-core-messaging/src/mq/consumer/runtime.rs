@@ -6,12 +6,13 @@
 //! 与 [super::task::MqConsumer] / [crate::runtime::ServiceRuntime] 集成：使用 [ConsumerRuntimeTask]，
 //! 通过 [crate::runtime::ServiceRuntime::add_mq_consumer] 或 [crate::runtime::ServiceRuntime::add_mq_consumer_runtime] 注册。
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
 use flare_core_runtime::config::{PollWorkerConfig, RuntimeConfig};
@@ -39,8 +40,8 @@ pub struct ConsumerConfig {
     pub max_retries: u32,
     /// 是否启用 DLQ
     pub enable_dlq: bool,
-    /// Kafka：覆盖 `KafkaConsumerConfig::consumer_group`（`None` 时使用传入的 Kafka 配置）
-    pub kafka_consumer_group_override: Option<String>,
+    /// JetStream：覆盖 `JetStreamConsumerConfig::consumer_group`（`None` 时使用传入的 JetStream 配置）
+    pub consumer_group_override: Option<String>,
 }
 
 impl Default for ConsumerConfig {
@@ -53,7 +54,7 @@ impl Default for ConsumerConfig {
             idempotent: true,
             max_retries: 3,
             enable_dlq: true,
-            kafka_consumer_group_override: None,
+            consumer_group_override: None,
         }
     }
 }
@@ -94,9 +95,9 @@ impl ConsumerConfig {
         self
     }
 
-    /// Kafka：设置 `group.id` 覆盖（与 [crate::mq::kafka::KafkaMessageFetcher::new_with_consumer_group] 一致）
-    pub fn with_kafka_consumer_group(mut self, group_id: impl Into<String>) -> Self {
-        self.kafka_consumer_group_override = Some(group_id.into());
+    /// JetStream：设置 `group.id` 覆盖（与 [crate::mq::jetstream::JetStreamMessageFetcher::new_with_consumer_group] 一致）
+    pub fn with_consumer_group(mut self, group_id: impl Into<String>) -> Self {
+        self.consumer_group_override = Some(group_id.into());
         self
     }
 }
@@ -105,15 +106,20 @@ impl ConsumerConfig {
 pub struct ConsumerRuntime {
     config: ConsumerConfig,
     dispatcher: Arc<dyn Dispatcher>,
+    key_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl ConsumerRuntime {
     /// 创建新的消费者运行时
     pub fn new(config: ConsumerConfig, dispatcher: Arc<dyn Dispatcher>) -> Self {
-        Self { config, dispatcher }
+        Self {
+            config,
+            dispatcher,
+            key_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    /// 持续拉取并处理消息，直到进程退出或 `fetch` 侧永久失败（与 [Self::run_with_shutdown] 相对，用于独立 Kafka/NATS 入口）
+    /// 持续拉取并处理消息，直到进程退出或 `fetch` 侧永久失败（与 [Self::run_with_shutdown] 相对，用于独立 JetStream/NATS 入口）
     pub async fn run<MF>(&self, message_fetcher: &mut MF) -> Result<(), ConsumerError>
     where
         MF: MessageFetcher + Send + ?Sized,
@@ -126,7 +132,14 @@ impl ConsumerRuntime {
         loop {
             match message_fetcher.fetch().await {
                 Ok(Some(message)) => {
-                    Self::spawn_message_task(message, &semaphore, &self.dispatcher, &mut tasks);
+                    Self::spawn_message_task(
+                        message,
+                        &semaphore,
+                        &self.dispatcher,
+                        &mut tasks,
+                        self.config.ordered,
+                        &self.key_locks,
+                    );
                 }
                 Ok(None) => {
                     tokio::time::sleep(idle_backoff).await;
@@ -167,6 +180,8 @@ impl ConsumerRuntime {
                                 &semaphore,
                                 &self.dispatcher,
                                 &mut tasks,
+                                self.config.ordered,
+                                &self.key_locks,
                             );
                         }
                         Ok(None) => {
@@ -198,15 +213,35 @@ impl ConsumerRuntime {
         semaphore: &Arc<Semaphore>,
         dispatcher: &Arc<dyn Dispatcher>,
         tasks: &mut JoinSet<Result<(), ConsumerError>>,
+        ordered: bool,
+        key_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     ) {
         let semaphore = semaphore.clone();
         let dispatcher = dispatcher.clone();
+        let key_locks = key_locks.clone();
 
         tasks.spawn(async move {
             match semaphore.acquire().await {
                 Ok(permit) => {
                     let _permit = permit;
-                    Self::process_message(dispatcher, message).await
+                    if ordered {
+                        let key = message
+                            .context
+                            .key
+                            .clone()
+                            .unwrap_or_else(|| message.context.topic.clone());
+                        let lock = {
+                            let mut locks = key_locks.lock().await;
+                            locks
+                                .entry(key)
+                                .or_insert_with(|| Arc::new(Mutex::new(())))
+                                .clone()
+                        };
+                        let _key_guard = lock.lock().await;
+                        Self::process_message(dispatcher, message).await
+                    } else {
+                        Self::process_message(dispatcher, message).await
+                    }
                 }
                 Err(_) => {
                     tracing::error!("Consumer semaphore closed");
@@ -236,7 +271,7 @@ impl ConsumerRuntime {
 
         // 幂等性检查
         if Self::is_duplicate(&message) {
-            tracing::debug!(
+            tracing::trace!(
                 message_id = %message_id,
                 "Duplicate message, skipping"
             );
@@ -247,17 +282,37 @@ impl ConsumerRuntime {
         Self::record_consumed(&message);
 
         // 分发消息
-        let result = dispatcher.dispatch(message).await?;
+        let ack_handle = message.ack_handle.clone();
+        let result = match dispatcher.dispatch(message).await {
+            Ok(result) => result,
+            Err(err) => {
+                if let Some(ack) = ack_handle.as_ref() {
+                    if let Err(ack_err) = ack.nack().await {
+                        tracing::warn!(error = %ack_err, "Failed to nack message after handler error");
+                    }
+                }
+                return Err(err);
+            }
+        };
 
         // 处理结果
         match result {
             MessageResult::Ack => {
-                tracing::debug!(message_id = %message_id, "Message acknowledged");
+                if let Some(ack) = ack_handle.as_ref() {
+                    ack.ack().await?;
+                }
+                tracing::trace!(message_id = %message_id, "Message acknowledged");
             }
             MessageResult::Nack => {
+                if let Some(ack) = ack_handle.as_ref() {
+                    ack.nack().await?;
+                }
                 tracing::warn!(message_id = %message_id, "Message nacked");
             }
             MessageResult::DeadLetter => {
+                if let Some(ack) = ack_handle.as_ref() {
+                    ack.term().await?;
+                }
                 tracing::error!(message_id = %message_id, "Message sent to DLQ");
                 // TODO: 发送到 DLQ
             }

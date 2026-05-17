@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// 任务管理器
 ///
@@ -75,7 +75,7 @@ impl TaskManager {
 
     /// 添加任务
     pub fn add_task(&mut self, task: Box<dyn Task>) {
-        info!(task_name = %task.name(), "Adding task to manager");
+        debug!(task_name = %task.name(), "Adding task to manager");
         self.tasks.push(task);
     }
 
@@ -145,7 +145,7 @@ impl TaskManager {
                 // 更新状态
                 match &result {
                     Ok(_) => {
-                        info!(task_name = %task_name, "✅ Task completed");
+                        debug!(task_name = %task_name, "Task completed");
                         state_tracker
                             .update_state(&task_name, TaskState::Stopped)
                             .await;
@@ -189,7 +189,7 @@ impl TaskManager {
             while let Some(result) = join_set.join_next().await {
                 match result {
                     Ok(Ok(_)) => {
-                        info!("Task completed gracefully");
+                        debug!("Task completed gracefully");
                     }
                     Ok(Err(e)) => {
                         warn!("Task completed with error: {}", e);
@@ -215,7 +215,7 @@ impl TaskManager {
     /// 等待所有任务就绪
     pub async fn wait_for_ready(&self) -> Result<(), RuntimeError> {
         if !self.config.task_startup.enable_ready_check {
-            info!("Task ready check is disabled, skipping");
+            debug!("Task ready check is disabled, skipping");
             return Ok(());
         }
 
@@ -321,10 +321,13 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             Ok(())
         })));
-        manager.add_task(Box::new(SpawnTask::new("conversation-ensure-consumer", async {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            Ok(())
-        })));
+        manager.add_task(Box::new(SpawnTask::new(
+            "conversation-ensure-consumer",
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                Ok(())
+            },
+        )));
 
         let (mut join_set, shutdown_txs) = manager.start_all().await.expect("start_all");
         for tx in shutdown_txs {

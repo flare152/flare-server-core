@@ -170,12 +170,21 @@ impl ServiceDiscover {
         {
             for new_inst in new_instances {
                 let id = new_inst.instance_id.clone();
-                // 创建 Channel 并缓存
-                if let Ok(service) = updater.create_channel_service(&new_inst).await {
-                    updater.insert(id.clone(), service).await;
-                    // 更新内部实例映射
-                    let mut current = discover.instances.write().await;
-                    current.insert(id, new_inst);
+                match updater.create_channel_service(&new_inst).await {
+                    Ok(service) => {
+                        updater.insert(id.clone(), service).await;
+                        let mut current = discover.instances.write().await;
+                        current.insert(id, new_inst);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            service_type = %service_type,
+                            instance_id = %id,
+                            address = %new_inst.address,
+                            error = %e,
+                            "service discover: failed to prepare gRPC channel for instance"
+                        );
+                    }
                 }
             }
         }
@@ -366,13 +375,10 @@ impl ServiceDiscoverUpdater {
             }
         }
 
-        // 创建新的 Channel
+        // 延迟建连：避免插件尚未监听时 discover 失败导致 Balance 永远无可用实例。
         let endpoint = tonic::transport::Endpoint::from_shared(uri)
             .map_err(|e| format!("Invalid URI: {}", e))?;
-        let channel = endpoint
-            .connect()
-            .await
-            .map_err(|e| format!("Failed to connect: {}", e))?;
+        let channel = endpoint.connect_lazy();
 
         let service = ChannelService::new(channel);
 

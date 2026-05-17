@@ -67,10 +67,13 @@ reqwest = { version = "0.12", features = ["json"] }
 redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
 
 # ===== 认证 =====
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["hmac", "sha2"] }
+hmac = "0.12"
+sha2 = "0.10"
 
 # ===== 消息队列 =====
-rdkafka = { version = "0.38" }
+async-nats = { version = "0.42" }
+rdkafka = { version = "0.36", features = ["cmake-build"] }
 
 # ===== 指标 =====
 prometheus = "0.14"
@@ -117,8 +120,8 @@ grpc = ["flare-core-transport/grpc"]
 discovery = ["flare-core-transport/discovery"]
 
 # 消息队列功能
-kafka = ["flare-core-messaging/kafka"]
 nats = ["flare-core-messaging/nats"]
+kafka = ["flare-core-messaging/kafka"]
 
 # 基础设施功能
 kv = ["flare-core-infra/kv"]
@@ -129,7 +132,7 @@ telemetry = ["flare-core-infra/telemetry"]
 proto = []
 
 # 完整功能
-full = ["http", "grpc", "discovery", "kafka", "kv", "auth", "telemetry", "proto"]
+full = ["http", "grpc", "discovery", "nats", "kafka", "kv", "auth", "telemetry", "proto"]
 
 [dependencies]
 # 内部 crate

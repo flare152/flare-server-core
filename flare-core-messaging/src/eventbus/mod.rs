@@ -25,15 +25,9 @@ pub use in_memory_topic_event_bus::{
 pub use mq_consumer::{TopicEventMqConsumer, TopicEventMqConsumerTask};
 #[allow(deprecated)]
 pub use mq_topic::{
-    MqEventBus,
-    MqEventBusRuntime,
-    MqEventHandler,
-    TopicEnvelopeHandler,
-    TopicEnvelopeMessageHandler,
-    register_event_handler,
-    register_topic_envelope_dispatcher,
-    run_event_consumer,
-    run_topic_event_consumer,
+    MqEventBus, MqEventBusRuntime, MqEventHandler, TopicEnvelopeHandler,
+    TopicEnvelopeMessageHandler, register_event_handler, register_topic_envelope_dispatcher,
+    run_event_consumer, run_topic_event_consumer,
 };
 pub type MqTopicEventBus = MqEventBus;
 pub use topic_event_bus::TopicEventBus;

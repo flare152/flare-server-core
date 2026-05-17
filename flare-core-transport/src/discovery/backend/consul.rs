@@ -35,8 +35,14 @@ impl ConsulBackend {
             .and_then(|ns| ns.default.clone())
             .unwrap_or_else(|| "default".to_string());
 
+        // 本地 Consul 必须直连；系统/环境 HTTP 代理会拦截 localhost 导致注册失败。
+        let http_client = HttpClient::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| format!("Failed to build Consul HTTP client: {}", e))?;
+
         Ok(Self {
-            http_client: Arc::new(HttpClient::new()),
+            http_client: Arc::new(http_client),
             consul_url,
             _default_namespace: default_namespace,
         })
@@ -261,7 +267,7 @@ impl DiscoveryBackend for ConsulBackend {
             .await
             .map_err(|e| format!("Failed to read response body: {}", e))?;
 
-        tracing::debug!(
+        tracing::trace!(
             service_type = %service_type,
             url = %url,
             status = %status,
@@ -286,7 +292,7 @@ impl DiscoveryBackend for ConsulBackend {
         })?;
 
         let total_services_count = services.len();
-        tracing::debug!(
+        tracing::trace!(
             service_type = %service_type,
             services_count = total_services_count,
             "Parsed Consul services"
@@ -335,7 +341,7 @@ impl DiscoveryBackend for ConsulBackend {
                 .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
-            tracing::debug!(
+            tracing::trace!(
                 service_type = %service_type,
                 instance_id = %instance.instance_id,
                 address = %instance.address,
@@ -346,7 +352,7 @@ impl DiscoveryBackend for ConsulBackend {
             // 过滤命名空间
             if let Some(ns) = namespace {
                 if !instance.matches_namespace(Some(ns)) {
-                    tracing::debug!(
+                    tracing::trace!(
                         instance_id = %instance.instance_id,
                         namespace = %ns,
                         "Instance filtered out by namespace"
@@ -358,7 +364,7 @@ impl DiscoveryBackend for ConsulBackend {
             // 过滤版本
             if let Some(ver) = version {
                 if !instance.matches_version(Some(ver)) {
-                    tracing::debug!(
+                    tracing::trace!(
                         instance_id = %instance.instance_id,
                         version = %ver,
                         "Instance filtered out by version"
@@ -374,7 +380,7 @@ impl DiscoveryBackend for ConsulBackend {
                     .map(|(k, v)| format!("{}={}", k, v))
                     .collect();
                 if !instance.matches_tags(tag_filters) {
-                    tracing::debug!(
+                    tracing::trace!(
                         instance_id = %instance.instance_id,
                         instance_tags = ?instance_tags,
                         required_tags = ?tag_filter_str,
@@ -382,7 +388,7 @@ impl DiscoveryBackend for ConsulBackend {
                     );
                     continue;
                 } else {
-                    tracing::debug!(
+                    tracing::trace!(
                         instance_id = %instance.instance_id,
                         instance_tags = ?instance_tags,
                         required_tags = ?tag_filter_str,
@@ -394,7 +400,7 @@ impl DiscoveryBackend for ConsulBackend {
             instances.push(instance);
         }
 
-        tracing::info!(
+        tracing::debug!(
             service_type = %service_type,
             total_found = total_services_count,
             filtered_count = instances.len(),

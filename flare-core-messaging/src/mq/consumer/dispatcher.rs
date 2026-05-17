@@ -2,8 +2,8 @@
 //!
 //! 按 topic 路由消息到对应的处理器。
 //!
-//! Kafka **消费者组（`group.id`）** 由 [crate::mq::kafka::KafkaMessageFetcher] /
-//! [crate::mq::consumer::ConsumerConfig::kafka_consumer_group_override] 与 `KafkaConsumerConfig` 决定，
+//! JetStream **消费者组（`group.id`）** 由 [crate::mq::jetstream::JetStreamMessageFetcher] /
+//! [crate::mq::consumer::ConsumerConfig::consumer_group_override] 与 `JetStreamConsumerConfig` 决定，
 //! 与 topic 路由正交（同一组可订阅多 topic，由本分发器按 topic 选 handler）。
 
 use std::collections::HashMap;
@@ -77,7 +77,7 @@ impl Dispatcher for TopicDispatcher {
         match self.find_handler(&topic) {
             Some(handler) => {
                 let handler_name = handler.name();
-                tracing::debug!(topic = %topic, handler = %handler_name, "Dispatching message");
+                tracing::trace!(topic = %topic, handler = %handler_name, "Dispatching message");
                 handler.handle(message).await
             }
             None => {
@@ -142,7 +142,7 @@ impl Dispatcher for RegistryDispatcher {
         match self.registry.get(&topic) {
             Some(handler) => {
                 let handler_name = handler.name();
-                tracing::debug!(topic = %topic, handler = %handler_name, "Dispatching message");
+                tracing::trace!(topic = %topic, handler = %handler_name, "Dispatching message");
                 handler.handle(message).await
             }
             None => {

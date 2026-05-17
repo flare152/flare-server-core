@@ -1,63 +1,100 @@
-//! Kafka 生产者实现
-//!
-//! 实现基于 Kafka 的消息生产，支持 Context 透传。
-
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
+use rdkafka::ClientConfig;
 use rdkafka::message::{Header, OwnedHeaders};
-use rdkafka::producer::FutureProducer;
-use rdkafka::producer::FutureRecord;
+use rdkafka::producer::{FutureProducer, FutureRecord};
 
 use super::config::KafkaProducerConfig;
-use crate::mq::producer::{Producer, ProducerError, ProducerMessage};
+use crate::mq::producer::{Producer, ProducerConfig, ProducerError, ProducerMessage};
 
-/// Kafka 生产者
+/// Apache Kafka producer implementation for the common MQ [`Producer`] trait.
 pub struct KafkaProducer {
-    producer: Arc<FutureProducer>,
-    config: crate::mq::producer::ProducerConfig,
+    producer: FutureProducer,
+    timeout: Duration,
 }
 
 impl KafkaProducer {
-    /// 创建新的 Kafka 生产者
     pub fn new<C>(config: &C) -> Result<Self, ProducerError>
     where
         C: KafkaProducerConfig + Send + Sync,
     {
-        let producer = super::build_kafka_producer(config)
+        let brokers = config.kafka_brokers();
+        if brokers.is_empty() {
+            return Err(ProducerError::Configuration(
+                "kafka brokers is empty".to_string(),
+            ));
+        }
+
+        let mut client = ClientConfig::new();
+        client
+            .set("bootstrap.servers", brokers.join(","))
+            .set("client.id", config.kafka_client_id())
+            .set("acks", config.kafka_acks())
+            .set("compression.type", config.kafka_compression())
+            .set("linger.ms", config.kafka_linger_ms().to_string())
+            .set("batch.size", config.kafka_batch_size_bytes().to_string())
+            .set(
+                "message.timeout.ms",
+                config.kafka_message_timeout_ms().to_string(),
+            )
+            .set(
+                "request.timeout.ms",
+                config.kafka_request_timeout_ms().to_string(),
+            )
+            .set(
+                "enable.idempotence",
+                if config.kafka_enable_idempotence() {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
+            .set(
+                "max.in.flight.requests.per.connection",
+                config
+                    .kafka_max_in_flight_requests_per_connection()
+                    .to_string(),
+            );
+
+        for (key, value) in config.kafka_options() {
+            client.set(key, value);
+        }
+
+        let producer = client
+            .create::<FutureProducer>()
             .map_err(|e| ProducerError::Configuration(e.to_string()))?;
 
-        let producer_config = crate::mq::producer::ProducerConfig {
-            timeout_ms: config.message_timeout_ms(),
-            enable_idempotence: config.enable_idempotence(),
-            compression_type: config.compression_type().to_string(),
-            batch_size: config.batch_size(),
-            linger_ms: config.linger_ms(),
-            retries: config.retries(),
-            retry_backoff_ms: config.retry_backoff_ms(),
-        };
-
         Ok(Self {
-            producer: Arc::new(producer),
-            config: producer_config,
+            producer,
+            timeout: Duration::from_millis(config.kafka_message_timeout_ms().max(1)),
         })
     }
 
-    /// 添加 Context 到消息头（实现 Context 透传）
-    ///
-    /// 使用统一的 `mq::context::merge_ctx_to_headers` 方法
-    fn add_context_to_headers(
-        &self,
-        headers: &mut HashMap<String, String>,
+    fn build_headers(
         ctx: &flare_core_base::context::Ctx,
-    ) {
-        crate::mq::context::merge_ctx_to_headers(headers, ctx);
-    }
+        key: Option<&str>,
+        headers: Option<HashMap<String, String>>,
+    ) -> OwnedHeaders {
+        let mut merged = headers.unwrap_or_default();
+        crate::mq::context::merge_ctx_to_headers(&mut merged, ctx);
+        if let Some(key) = key.filter(|v| !v.is_empty()) {
+            merged
+                .entry("x-message-key".to_string())
+                .or_insert_with(|| key.to_string());
+        }
+        merged
+            .entry("content-type".to_string())
+            .or_insert_with(|| "application/protobuf".to_string());
 
-    /// 生成消息 ID
-    fn generate_message_id(&self) -> String {
-        uuid::Uuid::new_v4().to_string()
+        let mut out = OwnedHeaders::new();
+        for (key, value) in merged {
+            out = out.insert(Header {
+                key: key.as_str(),
+                value: Some(value.as_bytes()),
+            });
+        }
+        out
     }
 }
 
@@ -71,41 +108,17 @@ impl Producer for KafkaProducer {
         payload: Vec<u8>,
         headers: Option<HashMap<String, String>>,
     ) -> Result<(), ProducerError> {
-        let mut all_headers = headers.unwrap_or_default();
-        self.add_context_to_headers(&mut all_headers, ctx);
-        let message_id = self.generate_message_id();
-
-        let mut owned = OwnedHeaders::new();
-        owned = owned.insert(Header {
-            key: "x-message-id",
-            value: Some(message_id.as_str()),
-        });
-        for (hk, hv) in all_headers {
-            owned = owned.insert(Header {
-                key: hk.as_str(),
-                value: Some(hv.as_str()),
-            });
-        }
-
-        let mut record = FutureRecord::to(topic).payload(&payload).headers(owned);
-
-        if let Some(k) = key {
-            record = record.key(k);
+        let headers = Self::build_headers(ctx, key, headers);
+        let mut record = FutureRecord::to(topic).payload(&payload).headers(headers);
+        if let Some(key) = key {
+            record = record.key(key);
         }
 
         self.producer
-            .send(record, Duration::from_millis(self.config.timeout_ms))
+            .send(record, self.timeout)
             .await
-            .map_err(|(e, _)| ProducerError::Send(e.to_string()))?;
-
-        tracing::debug!(
-            topic = %topic,
-            message_id = %message_id,
-            trace_id = %ctx.trace_id(),
-            "Message sent successfully"
-        );
-
-        Ok(())
+            .map(|_| ())
+            .map_err(|(e, _)| ProducerError::Send(e.to_string()))
     }
 
     async fn send_batch(
@@ -113,13 +126,13 @@ impl Producer for KafkaProducer {
         ctx: &flare_core_base::context::Ctx,
         messages: Vec<ProducerMessage>,
     ) -> Result<(), ProducerError> {
-        for msg in messages {
+        for message in messages {
             self.send(
                 ctx,
-                &msg.topic,
-                msg.key.as_deref(),
-                msg.payload,
-                Some(msg.headers),
+                &message.topic,
+                message.key.as_deref(),
+                message.payload,
+                Some(message.headers),
             )
             .await?;
         }
@@ -127,35 +140,31 @@ impl Producer for KafkaProducer {
     }
 
     fn name(&self) -> &str {
-        "kafka_producer"
+        "kafka-producer"
     }
 }
 
-/// Kafka 生产者构建器
 pub struct KafkaProducerBuilder {
-    config: crate::mq::producer::ProducerConfig,
+    _config: ProducerConfig,
 }
 
 impl KafkaProducerBuilder {
-    /// 创建新的构建器
     pub fn new() -> Self {
         Self {
-            config: crate::mq::producer::ProducerConfig::default(),
+            _config: ProducerConfig::default(),
         }
     }
 
-    /// 设置配置
-    pub fn with_config(mut self, config: crate::mq::producer::ProducerConfig) -> Self {
-        self.config = config;
+    pub fn with_config(mut self, config: ProducerConfig) -> Self {
+        self._config = config;
         self
     }
 
-    /// 构建 Kafka 生产者
-    pub fn build<C>(self, kafka_config: &C) -> Result<KafkaProducer, ProducerError>
+    pub fn build<C>(self, config: &C) -> Result<KafkaProducer, ProducerError>
     where
         C: KafkaProducerConfig + Send + Sync,
     {
-        KafkaProducer::new(kafka_config)
+        KafkaProducer::new(config)
     }
 }
 

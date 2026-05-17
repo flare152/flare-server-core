@@ -9,7 +9,7 @@
 //! - **Runtime**: 消费循环和并发控制
 //! - **Fetcher**: 消息获取器抽象接口
 //!
-//! 注意：具体的 MQ 实现（如 Kafka、NATS、RocketMQ）应该在各自的模块中实现。
+//! 注意：具体的 MQ 实现（如 JetStream、NATS、RocketMQ）应该在各自的模块中实现。
 
 pub mod adapter;
 pub mod dispatcher;
@@ -26,4 +26,4 @@ pub use runtime::{
     ConsumerConfig, ConsumerRuntime, ConsumerRuntimeTask, ConsumerStats, MessageFetcher,
 };
 pub use task::{MqConsumer, MqConsumerTask};
-pub use types::{ConsumerError, ContentType, Message, MessageContext, MessageResult};
+pub use types::{ConsumerError, ContentType, Message, MessageAck, MessageContext, MessageResult};

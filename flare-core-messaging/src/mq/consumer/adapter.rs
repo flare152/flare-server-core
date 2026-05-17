@@ -15,7 +15,7 @@ use std::pin::Pin;
 /// ```rust
 /// use flare_core_messaging::mq::consumer::MqConsumerAdapter;
 ///
-/// let adapter = MqConsumerAdapter::new("kafka-consumer", || async {
+/// let adapter = MqConsumerAdapter::new("jetstream-consumer", || async {
 ///     // 消费消息
 ///     Ok(())
 /// });

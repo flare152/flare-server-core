@@ -7,8 +7,13 @@ pub mod consumer;
 pub mod producer;
 
 // 重新导出配置 Trait
-pub use config::{NatsConsumerConfig, NatsProducerConfig};
+pub use config::{
+    NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
+    resolve_subject_stream, subject_matches,
+};
 
 // 重新导出 Producer 和 Consumer
-pub use consumer::{NatsConsumerBuilder, NatsConsumerRuntime, NatsMessageFetcher};
+pub use consumer::{
+    NatsConsumerBuilder, NatsConsumerRuntime, NatsMessageFetcher, build_nats_consumer_tasks,
+};
 pub use producer::{NatsProducer, NatsProducerBuilder};

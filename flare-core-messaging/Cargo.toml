@@ -15,11 +15,11 @@ default = ["mq", "eventbus"]
 # 消息队列基础
 mq = []
 
-# Kafka 支持
-kafka = ["mq", "dep:rdkafka"]
+# NATS JetStream 支持
+nats = ["mq", "dep:async-nats"]
 
-# NATS 支持
-nats = ["mq"]
+# Apache Kafka 支持
+kafka = ["mq", "dep:rdkafka"]
 
 # 事件总线
 eventbus = []
@@ -63,6 +63,7 @@ uuid = { workspace = true }
 async-broadcast = { workspace = true }
 
 # ===== 消息队列 (可选) =====
+async-nats = { workspace = true, optional = true }
 rdkafka = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -1,6 +1,6 @@
 //! MQ Context 传播工具
 //!
-//! 提供统一的 Context ↔ Headers 转换逻辑，用于 Kafka、NATS 等消息队列。
+//! 提供统一的 Context ↔ Headers 转换逻辑，用于 JetStream、NATS 等消息队列。
 //! 基于 `utils::context` 模块的 `ctx_to_map` 和 `map_to_ctx` 实现。
 
 use flare_core_base::context::Ctx;

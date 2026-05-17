@@ -296,7 +296,7 @@ impl ServiceRegistry {
             // 立即发送一次心跳，确保服务注册后立即更新 TTL 状态
             match backend_clone.heartbeat(&instance_clone).await {
                 Ok(_) => {
-                    tracing::debug!(
+                    tracing::trace!(
                         instance_id = %instance_clone.instance_id,
                         "💓 Initial heartbeat sent"
                     );
@@ -317,7 +317,7 @@ impl ServiceRegistry {
                         // 各后端自行实现最适合的心跳方式
                         match backend_clone.heartbeat(&instance_clone).await {
                             Ok(_) => {
-                                tracing::debug!(
+                                tracing::trace!(
                                     instance_id = %instance_clone.instance_id,
                                     "💓 Heartbeat sent"
                                 );
@@ -332,7 +332,7 @@ impl ServiceRegistry {
                         }
                     }
                     _ = shutdown_rx.recv() => {
-                        info!(
+                        tracing::trace!(
                             instance_id = %instance_clone.instance_id,
                             "🛑 Heartbeat task stopped"
                         );
@@ -426,7 +426,7 @@ impl Drop for ServiceRegistry {
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     match backend.unregister(&instance_id).await {
                         Ok(_) => {
-                            tracing::info!(
+                            tracing::trace!(
                                 instance_id = %instance_id,
                                 "✅ Service unregistered (from Drop)"
                             );

@@ -44,7 +44,7 @@ impl MiddlewareChain {
     pub fn add(&mut self, middleware: Arc<dyn Middleware>) {
         let name = middleware.name().to_string();
         self.middlewares.push(middleware);
-        tracing::info!(middleware_name = %name, "Middleware added");
+        tracing::debug!(middleware_name = %name, "Middleware added");
     }
 
     /// 执行所有中间件的 before 钩子

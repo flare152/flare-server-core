@@ -91,7 +91,7 @@ pub fn ctx_to_map(ctx: &Ctx) -> HashMap<String, String> {
     if let Some(actor) = ctx.actor() {
         if !actor.actor_id().is_empty() {
             map.insert("x-actor-id".to_string(), actor.actor_id().to_string());
-            if actor.actor_type == ActorType::User {
+            if actor.actor_type == ActorType::User && !map.contains_key(keys::USER_ID) {
                 map.insert(keys::USER_ID.to_string(), actor.actor_id().to_string());
             }
         }

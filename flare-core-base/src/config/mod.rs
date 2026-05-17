@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+mod layered;
+pub use layered::LayeredConfig;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub service: ServiceConfig,

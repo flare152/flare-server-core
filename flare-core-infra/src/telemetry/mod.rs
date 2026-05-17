@@ -29,10 +29,13 @@ impl Default for LoggingSubscriberOptions {
     }
 }
 
-/// 无 `RUST_LOG` 时：业务用 `level`，第三方库降噪
+/// 无 `RUST_LOG` 时：业务用 `level`，第三方库降噪。
+///
+/// 与 `flare-im-core/scripts/start_server.sh` 中默认 `RUST_LOG` 保持同类项一致，避免本地 `logs/` 被
+/// `sqlx` / `tokio` / NATS / gRPC 栈在 `trace` 下刷到数 GB。
 fn default_env_filter(app_level: &str) -> EnvFilter {
     let s = format!(
-        "{},hyper=warn,reqwest=warn,h2=warn,rdkafka=warn,tower=warn,tokio=warn,sqlx=warn,tantivy=warn",
+        "{},hyper=warn,reqwest=warn,h2=warn,rdkafka=warn,tower=warn,tokio=warn,sqlx=warn,tantivy=warn,async_nats=warn,tonic=warn,redis=warn",
         app_level
     );
     EnvFilter::try_new(&s).unwrap_or_else(|_| EnvFilter::new(app_level))

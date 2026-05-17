@@ -30,7 +30,9 @@ pub use error::{
 };
 
 // Re-exports - Config
-pub use config::{Config, MeshConfig, RegistryConfig, ServerConfig, ServiceConfig, StorageConfig};
+pub use config::{
+    Config, LayeredConfig, MeshConfig, RegistryConfig, ServerConfig, ServiceConfig, StorageConfig,
+};
 
 // Re-exports - I18n
 pub use i18n::{I18n, default_en_us_translations, default_zh_cn_translations};

@@ -5,7 +5,7 @@
 use super::HealthCheck;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, warn};
 
 /// 健康检查结果
 #[derive(Debug, Clone)]
@@ -72,7 +72,7 @@ impl HealthChecker {
     pub fn add_check(&mut self, check: Arc<dyn HealthCheck>) {
         let name = check.name().to_string();
         self.checks.push(check);
-        info!(check_name = %name, "Health check added");
+        debug!(check_name = %name, "Health check added");
     }
 
     /// 执行所有健康检查

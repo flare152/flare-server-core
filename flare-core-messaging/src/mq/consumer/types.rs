@@ -3,6 +3,8 @@
 //! 定义通用的消息类型、错误类型等，不依赖具体的 MQ 实现。
 
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
 use std::time::Instant;
 
 use flare_core_base::context::Ctx;
@@ -183,7 +185,7 @@ impl ContentType {
 /// 通用的 MQ 消息类型
 ///
 /// 支持多种序列化格式（JSON、Protobuf、Avro 等）
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Message {
     /// 原始消息内容
     pub payload: Vec<u8>,
@@ -191,6 +193,9 @@ pub struct Message {
     pub content_type: ContentType,
     /// 消息上下文
     pub context: MessageContext,
+    /// Broker ack handle. JetStream auto-commit paths may leave this empty; JetStream uses it
+    /// so ack/nack happens after handler result instead of at fetch time.
+    pub ack_handle: Option<Arc<dyn MessageAck>>,
 }
 
 impl Message {
@@ -200,7 +205,13 @@ impl Message {
             payload,
             content_type,
             context,
+            ack_handle: None,
         }
+    }
+
+    pub fn with_ack_handle(mut self, ack_handle: Arc<dyn MessageAck>) -> Self {
+        self.ack_handle = Some(ack_handle);
+        self
     }
 
     /// 反序列化为 JSON（带格式校验）
@@ -275,4 +286,22 @@ impl Message {
             ConsumerError::Deserialization(format!("Failed to convert to string: {}", e))
         })
     }
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Message")
+            .field("payload_len", &self.payload.len())
+            .field("content_type", &self.content_type)
+            .field("context", &self.context)
+            .field("has_ack_handle", &self.ack_handle.is_some())
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+pub trait MessageAck: Send + Sync {
+    async fn ack(&self) -> Result<(), ConsumerError>;
+    async fn nack(&self) -> Result<(), ConsumerError>;
+    async fn term(&self) -> Result<(), ConsumerError>;
 }

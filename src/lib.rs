@@ -52,19 +52,17 @@ pub use flare_core_transport::grpc::utils::{
 // gRPC client (需要 grpc feature)
 #[cfg(feature = "grpc")]
 pub use flare_core_transport::grpc::client::{
-    set_context_metadata, request_with_context,
-    ClientContextConfig, ClientContextInterceptor,
-    context_interceptor_with_tenant, context_interceptor_with_tenant_and_user,
-    default_context_interceptor,
+    ClientContextConfig, ClientContextInterceptor, context_interceptor_with_tenant,
+    context_interceptor_with_tenant_and_user, default_context_interceptor, request_with_context,
+    set_context_metadata,
 };
 
 // gRPC middleware (需要 grpc feature)
 #[cfg(feature = "grpc")]
 pub use flare_core_transport::grpc::middleware::{
-    ContextLayer, ContextService,
-    extract_actor_id, extract_context, extract_request_id,
-    extract_tenant_id, extract_user_id, get_context,
-    require_actor_id, require_request_id, require_tenant_id, require_user_id,
+    ContextLayer, ContextService, extract_actor_id, extract_context, extract_request_id,
+    extract_tenant_id, extract_user_id, get_context, require_actor_id, require_request_id,
+    require_tenant_id, require_user_id,
 };
 
 // 传输层 (需要对应 feature)
@@ -85,9 +83,9 @@ pub use flare_core_transport::discovery::{DiscoveryFactory, LoadBalanceStrategy,
 pub use flare_core_messaging::eventbus;
 pub use flare_core_messaging::mq;
 
-// Kafka 支持 (需要 kafka feature)
-#[cfg(feature = "kafka")]
-pub use flare_core_messaging::mq::kafka;
+// NATS JetStream 支持 (需要 nats feature)
+#[cfg(feature = "nats")]
+pub use flare_core_messaging::mq::nats;
 
 // 重新导出 eventbus 的常用类型
 pub use flare_core_messaging::eventbus::{
@@ -129,10 +127,9 @@ pub use flare_core_transport::http::middleware;
 #[cfg(all(feature = "grpc", not(feature = "http")))]
 pub mod middleware {
     pub use flare_core_transport::grpc::middleware::{
-        ContextLayer, ContextService,
-        extract_actor_id, extract_context, extract_request_id,
-        extract_tenant_id, extract_user_id, get_context,
-        require_actor_id, require_request_id, require_tenant_id, require_user_id,
+        ContextLayer, ContextService, extract_actor_id, extract_context, extract_request_id,
+        extract_tenant_id, extract_user_id, get_context, require_actor_id, require_request_id,
+        require_tenant_id, require_user_id,
     };
 }
 
@@ -142,10 +139,9 @@ pub mod middleware {
     pub use flare_core_transport::http::middleware::*;
     // gRPC middleware
     pub use flare_core_transport::grpc::middleware::{
-        ContextLayer, ContextService,
-        extract_actor_id, extract_context, extract_request_id,
-        extract_tenant_id, extract_user_id, get_context,
-        require_actor_id, require_request_id, require_tenant_id, require_user_id,
+        ContextLayer, ContextService, extract_actor_id, extract_context, extract_request_id,
+        extract_tenant_id, extract_user_id, get_context, require_actor_id, require_request_id,
+        require_tenant_id, require_user_id,
     };
 }
 
@@ -153,10 +149,9 @@ pub mod middleware {
 #[cfg(feature = "grpc")]
 pub mod client {
     pub use flare_core_transport::grpc::client::{
-        set_context_metadata, request_with_context,
-        ClientContextConfig, ClientContextInterceptor,
-        context_interceptor_with_tenant, context_interceptor_with_tenant_and_user,
-        default_context_interceptor,
+        ClientContextConfig, ClientContextInterceptor, context_interceptor_with_tenant,
+        context_interceptor_with_tenant_and_user, default_context_interceptor,
+        request_with_context, set_context_metadata,
     };
 }
 

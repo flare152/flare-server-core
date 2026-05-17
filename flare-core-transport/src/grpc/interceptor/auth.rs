@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use flare_core_infra::auth::TokenService;
 use tonic::{Request, Status};
-use tracing::{error, info};
+use tracing::{debug, error};
 
 /// 认证拦截器
 pub struct AuthInterceptor {
@@ -27,7 +27,7 @@ impl AuthInterceptor {
         // 验证 token
         match self.token_service.validate_token(&token) {
             Ok(claims) => {
-                info!(subject = %claims.sub, "Request authenticated");
+                debug!(subject = %claims.sub, "Request authenticated");
                 Ok(req)
             }
             Err(err) => {

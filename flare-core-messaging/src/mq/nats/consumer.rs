@@ -2,24 +2,90 @@
 //!
 //! 实现基于 NATS JetStream 的消息消费，支持并发消费、Context 透传等特性。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use async_nats::Message as NatsMessage;
 use async_nats::jetstream;
+use async_nats::jetstream::Message as NatsMessage;
 use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use async_nats::jetstream::consumer::pull::Stream as PullStream;
+use futures_util::StreamExt;
 
-use super::config::NatsConsumerConfig;
+use super::config::{NatsConsumerConfig, NatsStreamSpec, resolve_subject_stream};
+use crate::mq::consumer::dispatcher::Dispatcher;
 use crate::mq::consumer::{
-    ConsumerConfig, ConsumerError, ContentType, Message, MessageContext, MessageFetcher,
+    ConsumerConfig, ConsumerError, ConsumerRuntimeTask, ContentType, Message, MessageAck,
+    MessageContext, MessageFetcher, MqConsumerTask,
 };
+
+pub fn context_from_nats_headers(
+    headers: &std::collections::HashMap<String, String>,
+) -> flare_core_base::context::Ctx {
+    crate::mq::context::mq_headers_to_ctx(headers)
+}
 
 /// NATS JetStream 消息获取器
 pub struct NatsMessageFetcher {
     stream: PullStream,
-    subjects: Vec<String>,
     manual_ack: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedNatsConsumerConfig {
+    nats_url: String,
+    consumer_group: String,
+    manual_ack: bool,
+    batch_size: usize,
+    batch_timeout_ms: u64,
+    durable: bool,
+    stream: NatsStreamSpec,
+}
+
+impl ResolvedNatsConsumerConfig {
+    fn from_config<C>(config: &C, stream: NatsStreamSpec) -> Self
+    where
+        C: NatsConsumerConfig + Send + Sync,
+    {
+        Self {
+            nats_url: config.nats_url().to_string(),
+            consumer_group: config.consumer_group().to_string(),
+            manual_ack: config.enable_manual_ack(),
+            batch_size: config.batch_size(),
+            batch_timeout_ms: config.batch_timeout_ms(),
+            durable: config.enable_durable(),
+            stream,
+        }
+    }
+}
+
+impl NatsConsumerConfig for ResolvedNatsConsumerConfig {
+    fn nats_url(&self) -> &str {
+        &self.nats_url
+    }
+
+    fn consumer_group(&self) -> &str {
+        &self.consumer_group
+    }
+
+    fn enable_manual_ack(&self) -> bool {
+        self.manual_ack
+    }
+
+    fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    fn batch_timeout_ms(&self) -> u64 {
+        self.batch_timeout_ms
+    }
+
+    fn enable_durable(&self) -> bool {
+        self.durable
+    }
+
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        vec![self.stream.clone()]
+    }
 }
 
 impl NatsMessageFetcher {
@@ -35,30 +101,36 @@ impl NatsMessageFetcher {
         let context = jetstream::new(client);
         let manual_ack = config.enable_manual_ack();
 
-        // 创建或获取 stream
-        let stream_name = format!("stream_{}", config.consumer_group());
+        // 创建或更新业务 stream。业务只传 subjects，JetStream stream 由 core 统一解析。
+        let stream_spec = resolve_stream_for_subjects(config, &subjects)?;
+        let stream_name = stream_spec.name.clone();
         let stream = jetstream::stream::Config {
             name: stream_name.clone(),
-            subjects: subjects.clone(),
+            subjects: stream_spec.subjects.clone(),
             retention: jetstream::stream::RetentionPolicy::Limits,
-            max_age: std::time::Duration::from_secs(7 * 24 * 3600),
+            max_age: stream_spec.max_age,
             storage: jetstream::stream::StorageType::File,
+            num_replicas: stream_spec.num_replicas,
+            duplicate_window: stream_spec.duplicate_window,
             ..Default::default()
         };
 
-        let _ = context.create_stream(stream).await;
+        context
+            .create_or_update_stream(stream)
+            .await
+            .map_err(|e| ConsumerError::Configuration(e.to_string()))?;
 
         // 创建 consumer
         let consumer_name = if config.enable_durable() {
-            format!("consumer_{}", config.consumer_group())
+            durable_consumer_name(config.consumer_group(), &stream_name, &subjects)
         } else {
             "ephemeral_consumer".to_string()
         };
 
         let consumer_config = PullConfig {
-            name: Some(consumer_name),
+            name: Some(consumer_name.clone()),
             durable_name: if config.enable_durable() {
-                Some(format!("consumer_{}", config.consumer_group()))
+                Some(consumer_name)
             } else {
                 None
             },
@@ -67,45 +139,191 @@ impl NatsMessageFetcher {
             } else {
                 jetstream::consumer::AckPolicy::None
             },
-            batch_size: config.batch_size(),
-            batch_timeout: std::time::Duration::from_millis(config.batch_timeout_ms()),
+            filter_subjects: subjects.clone(),
+            ack_wait: std::time::Duration::from_secs(30),
+            max_deliver: 16,
+            max_ack_pending: (config.batch_size().saturating_mul(16)).max(1024) as i64,
+            max_batch: config.batch_size().max(1) as i64,
+            max_expires: std::time::Duration::from_millis(config.batch_timeout_ms().max(1)),
             ..Default::default()
         };
 
-        let stream = context
-            .create_consumer(stream_name.clone(), consumer_config)
+        let consumer = context
+            .create_consumer_on_stream(consumer_config, stream_name.clone())
             .await
             .map_err(|e| ConsumerError::Configuration(e.to_string()))?;
 
-        let fetcher = Self {
-            stream,
-            subjects,
-            manual_ack,
-        };
+        // Keep the client pull request within the server-side limits declared above.
+        // async-nats::Consumer::messages() defaults to batch=200/expires=30s, which
+        // can be rejected when the durable is capped by max_batch/max_expires.
+        let stream = consumer
+            .stream()
+            .max_messages_per_batch(config.batch_size().max(1))
+            .expires(std::time::Duration::from_millis(
+                config.batch_timeout_ms().max(1),
+            ))
+            .messages()
+            .await
+            .map_err(|e| ConsumerError::Configuration(e.to_string()))?;
 
-        tracing::info!(subjects = ?subjects, "Subscribed to NATS subjects");
+        tracing::info!(
+            stream = %stream_name,
+            consumer_group = %config.consumer_group(),
+            subjects = ?subjects,
+            batch_size = config.batch_size().max(1),
+            batch_timeout_ms = config.batch_timeout_ms().max(1),
+            "Subscribed to NATS subjects"
+        );
+        let fetcher = Self { stream, manual_ack };
+
         Ok(fetcher)
     }
+}
+
+/// 根据 dispatcher 注册的 subjects 自动拆分为多个 JetStream consumer task。
+///
+/// Kafka 的一个 consumer 可以同时订阅多个 topic；JetStream 的 durable consumer 必须绑定单个
+/// stream。本 builder 将这种差异收敛在 core 内部，业务侧仍只注册 subject handler。
+pub async fn build_nats_consumer_tasks<C>(
+    config: &C,
+    consumer_config: ConsumerConfig,
+    dispatcher: Arc<dyn Dispatcher>,
+    task_name_prefix: impl AsRef<str>,
+) -> Result<Vec<MqConsumerTask>, ConsumerError>
+where
+    C: NatsConsumerConfig + Send + Sync,
+{
+    let mut subjects = dispatcher.topics();
+    if subjects.is_empty() {
+        return Err(ConsumerError::Configuration(
+            "NATS consumer dispatcher has no registered subjects".to_string(),
+        ));
+    }
+
+    subjects.sort();
+    subjects.dedup();
+
+    let grouped = group_subjects_by_stream(config, &subjects)?;
+    let mut tasks = Vec::with_capacity(grouped.len());
+    let task_name_prefix = task_name_prefix.as_ref();
+
+    for (stream_name, (stream, stream_subjects)) in grouped {
+        let resolved_config = ResolvedNatsConsumerConfig::from_config(config, stream);
+        let fetcher = NatsMessageFetcher::new(&resolved_config, stream_subjects.clone()).await?;
+        let consumer =
+            ConsumerRuntimeTask::from_parts(consumer_config.clone(), dispatcher.clone(), fetcher);
+        let task_name = format!("{}-{}", task_name_prefix, sanitize_task_part(&stream_name));
+        tasks.push(MqConsumerTask::new(task_name, Box::new(consumer)));
+    }
+
+    Ok(tasks)
+}
+
+fn group_subjects_by_stream<C>(
+    config: &C,
+    subjects: &[String],
+) -> Result<BTreeMap<String, (NatsStreamSpec, Vec<String>)>, ConsumerError>
+where
+    C: NatsConsumerConfig + Send + Sync,
+{
+    let specs = config.stream_specs();
+    let mut grouped: BTreeMap<String, (NatsStreamSpec, Vec<String>)> = BTreeMap::new();
+
+    for subject in subjects {
+        let stream = resolve_subject_stream(&specs, subject)
+            .cloned()
+            .ok_or_else(|| {
+                ConsumerError::Configuration(format!(
+                    "No JetStream stream configured for subject: {}",
+                    subject
+                ))
+            })?;
+
+        grouped
+            .entry(stream.name.clone())
+            .or_insert_with(|| (stream, Vec::new()))
+            .1
+            .push(subject.clone());
+    }
+
+    Ok(grouped)
+}
+
+fn resolve_stream_for_subjects<C>(
+    config: &C,
+    subjects: &[String],
+) -> Result<NatsStreamSpec, ConsumerError>
+where
+    C: NatsConsumerConfig + Send + Sync,
+{
+    let grouped = group_subjects_by_stream(config, subjects)?;
+    if grouped.len() == 1 {
+        let mut values = grouped.into_values();
+        if let Some((stream, _)) = values.next() {
+            return Ok(stream);
+        }
+        return Err(ConsumerError::Configuration(
+            "No JetStream stream configured for subjects".to_string(),
+        ));
+    }
+
+    let streams = grouped.keys().cloned().collect::<Vec<_>>().join(", ");
+    Err(ConsumerError::Configuration(format!(
+        "Subjects span multiple JetStream streams ({streams}); use build_nats_consumer_tasks"
+    )))
+}
+
+fn sanitize_task_part(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn durable_consumer_name(group: &str, stream_name: &str, subjects: &[String]) -> String {
+    let mut sorted_subjects = subjects.to_vec();
+    sorted_subjects.sort();
+    sorted_subjects.dedup();
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for part in std::iter::once(stream_name)
+        .chain(std::iter::once(group))
+        .chain(sorted_subjects.iter().map(String::as_str))
+    {
+        for byte in part.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    let base = format!(
+        "consumer_{}_{}_{}",
+        sanitize_task_part(group),
+        sanitize_task_part(stream_name),
+        hash
+    );
+    base.chars().take(96).collect()
 }
 
 #[async_trait::async_trait]
 impl MessageFetcher for NatsMessageFetcher {
     async fn fetch(&mut self) -> Result<Option<Message>, ConsumerError> {
         match self.stream.next().await {
-            Ok(Some(msg)) => {
+            Some(Ok(msg)) => {
                 let message = self.decode_message(&msg)?;
-
-                // 手动确认
-                if self.manual_ack {
-                    if let Err(e) = msg.ack().await {
-                        tracing::warn!(error = %e, "Failed to ack message");
-                    }
-                }
 
                 Ok(Some(message))
             }
-            Ok(None) => Ok(None),
-            Err(e) => {
+            None => Ok(None),
+            Some(Err(e)) => {
                 if e.to_string().contains("timeout") {
                     Ok(None)
                 } else {
@@ -127,7 +345,7 @@ impl NatsMessageFetcher {
         if let Some(nats_headers) = &msg.headers {
             for (key, values) in nats_headers.iter() {
                 if let Some(value) = values.first() {
-                    headers.insert(key.clone(), value.clone());
+                    headers.insert(key.to_string(), value.to_string());
                 }
             }
         }
@@ -163,7 +381,14 @@ impl NatsMessageFetcher {
             metadata: HashMap::new(),
         };
 
-        Ok(Message::new(payload, content_type, message_context))
+        let message = Message::new(payload, content_type, message_context);
+        if self.manual_ack {
+            Ok(message.with_ack_handle(Arc::new(NatsMessageAck {
+                message: msg.clone(),
+            })))
+        } else {
+            Ok(message)
+        }
     }
 
     /// 从 NATS 消息头中构建 Context（Context 透传）
@@ -172,7 +397,7 @@ impl NatsMessageFetcher {
         headers: &HashMap<String, String>,
     ) -> flare_core_base::context::Ctx {
         use flare_core_base::context::keys;
-        use flare_core_base::context::{ActorContext, ActorType, Context, Ctx};
+        use flare_core_base::context::{ActorContext, ActorType, Context};
 
         // 提取 request_id
         let request_id = headers
@@ -247,6 +472,34 @@ impl NatsMessageFetcher {
         }
 
         Arc::new(ctx)
+    }
+}
+
+struct NatsMessageAck {
+    message: NatsMessage,
+}
+
+#[async_trait::async_trait]
+impl MessageAck for NatsMessageAck {
+    async fn ack(&self) -> Result<(), ConsumerError> {
+        self.message
+            .ack()
+            .await
+            .map_err(|e| ConsumerError::Connection(e.to_string()))
+    }
+
+    async fn nack(&self) -> Result<(), ConsumerError> {
+        self.message
+            .ack_with(jetstream::AckKind::Nak(None))
+            .await
+            .map_err(|e| ConsumerError::Connection(e.to_string()))
+    }
+
+    async fn term(&self) -> Result<(), ConsumerError> {
+        self.message
+            .ack_with(jetstream::AckKind::Term)
+            .await
+            .map_err(|e| ConsumerError::Connection(e.to_string()))
     }
 }
 

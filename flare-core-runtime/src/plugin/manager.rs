@@ -42,7 +42,7 @@ impl PluginManager {
     pub fn register(&mut self, plugin: Arc<dyn Plugin>) {
         let name = plugin.name().to_string();
         self.plugins.push(plugin);
-        tracing::info!(plugin_name = %name, "Plugin registered");
+        tracing::debug!(plugin_name = %name, "Plugin registered");
     }
 
     /// 运行时启动时调用

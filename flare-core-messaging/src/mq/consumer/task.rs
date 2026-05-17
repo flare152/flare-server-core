@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use flare_core_runtime::task::{Task, TaskResult};
 
-/// 在 [crate::runtime::ServiceRuntime] 中运行的 MQ 消费者契约（Kafka / NATS 等）
+/// 在 [crate::runtime::ServiceRuntime] 中运行的 MQ 消费者契约（JetStream / NATS 等）
 pub trait MqConsumer: Send + Sync {
     /// 在收到 `shutdown_rx` 时应退出拉取循环并收尾
     fn consume(

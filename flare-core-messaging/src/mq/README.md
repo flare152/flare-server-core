@@ -2,10 +2,10 @@
 
 ## 概述
 
-`flare-server-core/mq` 模块提供了一个工业级的统一 MQ 框架，支持生产者和消费者，支持 Kafka 和 NATS JetStream，具有以下特性：
+`flare-server-core/mq` 模块提供了一个工业级的统一 MQ 框架，支持生产者和消费者，支持 NATS JetStream，具有以下特性：
 
 - **统一接口**: Producer 和 Consumer 使用统一的接口设计
-- **多 MQ 支持**: Kafka 和 NATS JetStream
+- **多 MQ 支持**: NATS JetStream
 - **Context 透传**: 自动处理上下文信息（trace_id、user_id 等）
 - **批量发送**: 支持批量发送消息，提高吞吐量
 - **并发控制**: 消费者支持可配置的并发数
@@ -32,7 +32,7 @@
                      ▼
 ┌─────────────────────────────────────────────────────────┐
 │                 MQ 实现层 (impl)                         │
-│  - kafka/: Kafka 具体实现（包含 Context 透传）          │
+│  - jetstream/: JetStream 具体实现（包含 Context 透传）          │
 │  - nats/: NATS JetStream 具体实现（包含 Context 透传）  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -57,7 +57,7 @@ mq/
 
 ```
 mq/
-├── kafka/                    # Kafka 实现
+├── jetstream/                    # JetStream 实现
 │   ├── mod.rs
 │   ├── config.rs
 │   ├── producer.rs
@@ -153,20 +153,20 @@ pub struct MessageContext {
 - 如果存在 trace_id 则复用，否则生成新 ID
 - 构建完整的 Ctx 对象
 
-## Kafka 使用
+## JetStream 使用
 
 ### Producer 使用
 
 ```rust
 use flare_server_core::mq::producer::{Producer, ProducerConfig};
-use flare_server_core::mq::kafka::{KafkaProducerBuilder, KafkaProducerConfig};
+use flare_server_core::mq::jetstream::{JetStreamProducerBuilder, JetStreamProducerConfig};
 use flare_server_core::context::Context;
 
-// 定义 Kafka 配置
-struct MyKafkaConfig;
+// 定义 JetStream 配置
+struct MyJetStreamConfig;
 
-impl KafkaProducerConfig for MyKafkaConfig {
-    fn kafka_bootstrap(&self) -> &str { "localhost:9092" }
+impl JetStreamProducerConfig for MyJetStreamConfig {
+    fn jetstream_bootstrap(&self) -> &str { "localhost:9092" }
     fn message_timeout_ms(&self) -> u64 { 5000 }
     fn enable_idempotence(&self) -> bool { true }
     fn compression_type(&self) -> &str { "snappy" }
@@ -178,10 +178,10 @@ impl KafkaProducerConfig for MyKafkaConfig {
 }
 
 // 创建生产者
-let builder = KafkaProducerBuilder::new()
+let builder = JetStreamProducerBuilder::new()
     .with_config(ProducerConfig::default());
 
-let producer = builder.build(&MyKafkaConfig)?;
+let producer = builder.build(&MyJetStreamConfig)?;
 
 // 创建 Context
 let ctx = Context::with_request_id("req-123".to_string())
@@ -193,7 +193,7 @@ producer.send(
     &ctx,
     "test.topic",
     Some("key123"),
-    b"Hello, Kafka!".to_vec(),
+    b"Hello, JetStream!".to_vec(),
     None,
 ).await?;
 ```
@@ -202,7 +202,7 @@ producer.send(
 
 ```rust
 use flare_server_core::mq::consumer::{
-    KafkaConsumerBuilder, ConsumerConfig, MessageHandler, Message,
+    JetStreamConsumerBuilder, ConsumerConfig, MessageHandler, Message,
     MessageResult, ConsumerError,
 };
 use async_trait::async_trait;
@@ -232,7 +232,7 @@ impl MessageHandler for MyMessageHandler {
 }
 
 // 创建并启动消费者
-let builder = KafkaConsumerBuilder::new()
+let builder = JetStreamConsumerBuilder::new()
     .with_config(
         ConsumerConfig::default()
             .with_concurrency(4)
@@ -244,7 +244,7 @@ let builder = KafkaConsumerBuilder::new()
     )?;
 
 let runtime = builder.build();
-runtime.start(kafka_consumer_config).await?;
+runtime.start(jetstream_consumer_config).await?;
 ```
 
 ## NATS JetStream 使用
@@ -474,9 +474,9 @@ let config = ConsumerConfig::default()
     .with_idempotent(true);        // 启用幂等性检查
 ```
 
-## Kafka vs NATS
+## JetStream vs NATS
 
-| 特性 | Kafka | NATS JetStream |
+| 特性 | JetStream | NATS JetStream |
 |------|-------|----------------|
 | 消息模型 | Topic/Partition | Subject/Stream |
 | 消息键 | 支持 | 通过 Header |
@@ -511,6 +511,6 @@ let config = ConsumerConfig::default()
 - **清晰的分层架构**: 抽象层和实现层完全分离
 - **统一的接口**: 所有 MQ 实现共享相同的接口
 - **Context 透传**: 自动处理上下文信息的编码和解码
-- **多 MQ 支持**: Kafka 和 NATS JetStream
+- **多 MQ 支持**: NATS JetStream
 - **易于扩展**: 添加新 MQ 实现不需要修改抽象层
 - **生产级**: 支持幂等性、重试、优雅关闭等生产环境必需功能
