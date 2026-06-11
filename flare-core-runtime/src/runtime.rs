@@ -520,7 +520,29 @@ impl ServiceRuntime {
     /// 4. 等待关闭信号
     /// 5. 注销服务
     /// 6. 优雅关闭所有任务
-    pub async fn run_with_registration<F, Fut>(mut self, register_fn: F) -> Result<()>
+    pub async fn run_with_registration<F, Fut>(self, register_fn: F) -> Result<()>
+    where
+        F: FnOnce(SocketAddr) -> Fut,
+        Fut: std::future::Future<
+                Output = Result<
+                    Option<Box<dyn ServiceRegistry>>,
+                    Box<dyn std::error::Error + Send + Sync>,
+                >,
+            > + Send,
+    {
+        self.run_with_registration_and_signals(register_fn, vec![])
+            .await
+    }
+
+    /// 运行服务（带服务注册 + 自定义停机信号）
+    ///
+    /// 聚合部署进程可注入 [`ChannelSignal`](crate::signal::ChannelSignal)，
+    /// 让多个注册型服务共享同一个外部生命周期控制。
+    pub async fn run_with_registration_and_signals<F, Fut>(
+        mut self,
+        register_fn: F,
+        mut signals: Vec<Box<dyn ShutdownSignal>>,
+    ) -> Result<()>
     where
         F: FnOnce(SocketAddr) -> Fut,
         Fut: std::future::Future<
@@ -546,13 +568,13 @@ impl ServiceRuntime {
         );
 
         // 1. 构建停机信号
-        let mut shutdown_signal = CompositeSignal::new().add(Box::new(CtrlCSignal::new()));
+        if signals.is_empty() {
+            signals.push(Box::new(CtrlCSignal::new()));
 
-        #[cfg(target_family = "unix")]
-        {
-            shutdown_signal =
-                shutdown_signal.add(Box::new(UnixSignal::new(UnixSignalKind::Terminate)));
+            #[cfg(target_family = "unix")]
+            signals.push(Box::new(UnixSignal::new(UnixSignalKind::Terminate)));
         }
+        let mut shutdown_signal = CompositeSignal::from_signals(signals);
 
         // 2. 启动所有任务
         let (join_set, shutdown_txs) = self
@@ -682,5 +704,35 @@ mod tests {
         let runtime = ServiceRuntime::new("test-service").add_spawn("task-1", async { Ok(()) });
 
         assert_eq!(runtime.task_manager.task_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_with_registration_accepts_custom_shutdown_signal() {
+        use crate::signal::ChannelSignal;
+        use tokio::sync::oneshot;
+
+        let service_address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let runtime = ServiceRuntime::new("test-service")
+            .with_address(service_address)
+            .add_spawn_with_shutdown("wait-for-shutdown", |shutdown_rx| async move {
+                let _ = shutdown_rx.await;
+                Ok(())
+            });
+
+        let run = runtime.run_with_registration_and_signals(
+            |addr| async move {
+                assert_eq!(addr, service_address);
+                Ok(None)
+            },
+            vec![Box::new(ChannelSignal::new("test-shutdown", shutdown_rx))],
+        );
+        let stop = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            shutdown_tx.send(()).unwrap();
+        };
+
+        let (result, _) = tokio::join!(run, stop);
+        result.unwrap();
     }
 }
