@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::message::{BorrowedMessage, Headers, Message as KafkaMessage};
 use rdkafka::{Offset, TopicPartitionList};
 
+use super::super::process_ack_metrics::record_process_ack;
 use super::config::KafkaConsumerConfig;
 use crate::mq::consumer::dispatcher::Dispatcher;
+use crate::mq::consumer::failure::{ConsumerFailurePublishers, retry_count_from_headers};
 use crate::mq::consumer::{
     ConsumerConfig, ConsumerError, ConsumerRuntimeTask, ContentType, Message, MessageAck,
     MessageContext, MessageFetcher, MqConsumerTask,
@@ -104,6 +107,7 @@ impl KafkaMessageFetcher {
             .get("content-type")
             .and_then(|v| ContentType::from_str(v))
             .unwrap_or(ContentType::Protobuf);
+        let retry_count = retry_count_from_headers(&headers);
 
         let context = MessageContext {
             ctx,
@@ -114,7 +118,7 @@ impl KafkaMessageFetcher {
             key,
             headers,
             started_at: std::time::Instant::now(),
-            retry_count: 0,
+            retry_count,
             metadata: HashMap::new(),
         };
 
@@ -148,9 +152,43 @@ struct KafkaMessageAck {
     offset: i64,
 }
 
-#[async_trait::async_trait]
-impl MessageAck for KafkaMessageAck {
-    async fn ack(&self) -> Result<(), ConsumerError> {
+impl KafkaMessageAck {
+    fn commit_offset(&self, operation: &'static str) -> Result<(), ConsumerError> {
+        let started_at = Instant::now();
+        let result = self.commit_offset_inner();
+        let outcome = if result.is_ok() { "success" } else { "error" };
+
+        record_process_ack("kafka", operation, outcome, started_at.elapsed());
+
+        match &result {
+            Ok(()) => {
+                tracing::trace!(
+                    backend = "kafka",
+                    operation,
+                    topic = %self.topic,
+                    partition = self.partition,
+                    offset = self.offset,
+                    commit_offset = self.offset.saturating_add(1),
+                    "Kafka consumer offset committed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    backend = "kafka",
+                    operation,
+                    topic = %self.topic,
+                    partition = self.partition,
+                    offset = self.offset,
+                    error = %error,
+                    "Kafka consumer offset commit failed"
+                );
+            }
+        }
+
+        result
+    }
+
+    fn commit_offset_inner(&self) -> Result<(), ConsumerError> {
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(
             &self.topic,
@@ -163,12 +201,39 @@ impl MessageAck for KafkaMessageAck {
             .map_err(|e| ConsumerError::Connection(e.to_string()))
     }
 
+    fn record_noop(&self, operation: &'static str) {
+        let started_at = Instant::now();
+        record_process_ack("kafka", operation, "unsupported", started_at.elapsed());
+        tracing::trace!(
+            backend = "kafka",
+            operation,
+            topic = %self.topic,
+            partition = self.partition,
+            offset = self.offset,
+            "Kafka consumer process ack operation requires retry topic or DLQ handoff"
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageAck for KafkaMessageAck {
+    async fn ack(&self) -> Result<(), ConsumerError> {
+        self.commit_offset("ack")
+    }
+
     async fn nack(&self) -> Result<(), ConsumerError> {
-        Ok(())
+        self.record_noop("nack");
+        Err(ConsumerError::Configuration(
+            "Kafka consumer nack requires a retry publisher or DLQ handoff".to_string(),
+        ))
     }
 
     async fn term(&self) -> Result<(), ConsumerError> {
-        self.ack().await
+        self.commit_offset("term")
+    }
+
+    fn supports_native_retry(&self) -> bool {
+        false
     }
 }
 
@@ -177,6 +242,25 @@ pub fn build_kafka_consumer_tasks<C>(
     consumer_config: ConsumerConfig,
     dispatcher: Arc<dyn Dispatcher>,
     task_name_prefix: impl AsRef<str>,
+) -> Result<Vec<MqConsumerTask>, ConsumerError>
+where
+    C: KafkaConsumerConfig + Send + Sync,
+{
+    build_kafka_consumer_tasks_with_failure_publishers(
+        config,
+        consumer_config,
+        dispatcher,
+        task_name_prefix,
+        ConsumerFailurePublishers::default(),
+    )
+}
+
+pub fn build_kafka_consumer_tasks_with_failure_publishers<C>(
+    config: &C,
+    consumer_config: ConsumerConfig,
+    dispatcher: Arc<dyn Dispatcher>,
+    task_name_prefix: impl AsRef<str>,
+    failure_publishers: ConsumerFailurePublishers,
 ) -> Result<Vec<MqConsumerTask>, ConsumerError>
 where
     C: KafkaConsumerConfig + Send + Sync,
@@ -191,7 +275,12 @@ where
     topics.dedup();
 
     let fetcher = KafkaMessageFetcher::new(config, topics)?;
-    let consumer = ConsumerRuntimeTask::from_parts(consumer_config, dispatcher, fetcher);
+    let consumer = ConsumerRuntimeTask::from_parts_with_failure_publishers(
+        consumer_config,
+        dispatcher,
+        fetcher,
+        failure_publishers,
+    );
     Ok(vec![MqConsumerTask::new(
         task_name_prefix.as_ref().to_string(),
         Box::new(consumer),

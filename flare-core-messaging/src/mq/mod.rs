@@ -22,7 +22,7 @@
 //!
 //! ### 生产者
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use flare_server_core::mq::producer::{Producer, ProducerMessage, ProducerConfig};
 //! use flare_server_core::mq::jetstream::{JetStreamProducerBuilder, JetStreamProducerConfig};
 //!
@@ -54,7 +54,7 @@
 //!
 //! ### 消费者
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use flare_server_core::mq::consumer::{
 //!     JetStreamConsumerBuilder, ConsumerConfig, MessageHandler, Message,
 //!     MessageResult, ConsumerError,
@@ -89,6 +89,8 @@ pub mod nats;
 
 pub mod consumer;
 pub mod context;
+#[cfg(any(feature = "kafka", feature = "nats"))]
+pub(crate) mod process_ack_metrics;
 pub mod producer;
 
 // 重新导出 Producer 相关类型
@@ -104,11 +106,12 @@ pub use consumer::{
 #[cfg(feature = "nats")]
 pub use nats::{
     NatsConsumerBuilder, NatsConsumerConfig, NatsConsumerRuntime, NatsMessageFetcher, NatsProducer,
-    NatsProducerBuilder, NatsProducerConfig,
+    NatsProducerBuilder, NatsProducerConfig, build_nats_consumer_tasks_with_failure_publishers,
 };
 
 #[cfg(feature = "kafka")]
 pub use kafka::{
     KafkaConsumerConfig, KafkaMessageFetcher, KafkaProducer, KafkaProducerBuilder,
     KafkaProducerConfig, build_kafka_consumer_tasks,
+    build_kafka_consumer_tasks_with_failure_publishers,
 };

@@ -101,7 +101,7 @@ impl LayeredConfig {
     where
         T: DeserializeOwned,
     {
-        if let Some(raw) = std::env::var(env_json_key).ok() {
+        if let Ok(raw) = std::env::var(env_json_key) {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 return Some(vec![]);

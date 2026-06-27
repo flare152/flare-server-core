@@ -3,11 +3,72 @@
 use async_trait::async_trait;
 use reqwest::Client as HttpClient;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 use crate::discovery::{DiscoveryBackend, DiscoveryConfig, ServiceInstance};
 use base64::Engine;
 use flare_core_infra::kv::{KvBackend, KvEntry, KvError};
+
+struct DiscoverCacheEntry {
+    instances: Vec<ServiceInstance>,
+    fetched_at: Instant,
+}
+
+static SHARED_CONSUL_HTTP: LazyLock<Arc<HttpClient>> = LazyLock::new(|| {
+    Arc::new(
+        HttpClient::builder()
+            .no_proxy()
+            .pool_max_idle_per_host(32)
+            .build()
+            .expect("build shared Consul HTTP client"),
+    )
+});
+
+static CONSUL_DISCOVER_CACHE: LazyLock<Mutex<HashMap<String, DiscoverCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn discover_cache_ttl() -> Duration {
+    Duration::from_secs(
+        std::env::var("CONSUL_DISCOVER_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(15),
+    )
+}
+
+fn discover_cache_key(
+    service_type: &str,
+    namespace: Option<&str>,
+    version: Option<&str>,
+    tags: Option<&HashMap<String, String>>,
+) -> String {
+    let mut key = format!(
+        "{}|ns={}|ver={}",
+        service_type,
+        namespace.unwrap_or(""),
+        version.unwrap_or("")
+    );
+    if let Some(tag_filters) = tags {
+        let mut pairs: Vec<_> = tag_filters.iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in pairs {
+            key.push('|');
+            key.push_str(k);
+            key.push('=');
+            key.push_str(v);
+        }
+    }
+    key
+}
+
+fn response_is_rate_limited(status: reqwest::StatusCode, body: &str) -> bool {
+    status.as_u16() == 429
+        || body.contains("too many concurrent connections")
+        || body.contains("rate limit")
+}
 
 /// Consul 服务发现后端
 pub struct ConsulBackend {
@@ -36,13 +97,11 @@ impl ConsulBackend {
             .unwrap_or_else(|| "default".to_string());
 
         // 本地 Consul 必须直连；系统/环境 HTTP 代理会拦截 localhost 导致注册失败。
-        let http_client = HttpClient::builder()
-            .no_proxy()
-            .build()
-            .map_err(|e| format!("Failed to build Consul HTTP client: {}", e))?;
+        // 全进程共享连接池，避免每 ServiceDiscover 独立 client 占满 Consul 并发连接上限。
+        let http_client = SHARED_CONSUL_HTTP.clone();
 
         Ok(Self {
-            http_client: Arc::new(http_client),
+            http_client,
             consul_url,
             _default_namespace: default_namespace,
         })
@@ -243,172 +302,47 @@ impl DiscoveryBackend for ConsulBackend {
         version: Option<&str>,
         tags: Option<&HashMap<String, String>>,
     ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
-        // 在测试环境中，可能服务还没有通过健康检查，所以也查询所有服务（包括不健康的）
-        let passing_only =
-            std::env::var("CONSUL_PASSING_ONLY").unwrap_or_else(|_| "false".to_string()) == "true";
+        let cache_key = discover_cache_key(service_type, namespace, version, tags);
+        let ttl = discover_cache_ttl();
 
-        let url = format!("{}/v1/health/service/{}", self.consul_url, service_type);
-        let mut query_params = vec![];
-        if passing_only {
-            query_params.push(("passing", "true"));
+        {
+            let cache = CONSUL_DISCOVER_CACHE.lock().await;
+            if let Some(entry) = cache.get(&cache_key) {
+                if entry.fetched_at.elapsed() < ttl {
+                    return Ok(entry.instances.clone());
+                }
+            }
         }
 
-        let resp = self
-            .http_client
-            .get(&url)
-            .query(&query_params)
-            .send()
-            .await?;
-
-        // 记录响应状态和原始内容（用于调试）
-        let status = resp.status();
-        let resp_text = resp
-            .text()
+        match self
+            .discover_uncached(service_type, namespace, version, tags)
             .await
-            .map_err(|e| format!("Failed to read response body: {}", e))?;
-
-        tracing::trace!(
-            service_type = %service_type,
-            url = %url,
-            status = %status,
-            response_len = resp_text.len(),
-            tag_filters = ?tags,
-            "Consul service discovery response"
-        );
-
-        // 解析 JSON
-        let services: Vec<serde_json::Value> = serde_json::from_str(&resp_text).map_err(|e| {
-            tracing::error!(
-                service_type = %service_type,
-                error = %e,
-                response_preview = %resp_text.chars().take(500).collect::<String>(),
-                "Failed to parse Consul response as JSON"
-            );
-            format!(
-                "error decoding response body: {} (response preview: {})",
-                e,
-                resp_text.chars().take(200).collect::<String>()
-            )
-        })?;
-
-        let total_services_count = services.len();
-        tracing::trace!(
-            service_type = %service_type,
-            services_count = total_services_count,
-            "Parsed Consul services"
-        );
-
-        let mut instances = Vec::new();
-        for svc in services {
-            let service = svc.get("Service").ok_or("Invalid service format")?;
-            let address = service
-                .get("Address")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing address")?;
-            let port = service
-                .get("Port")
-                .and_then(|v| v.as_u64())
-                .ok_or("Missing port")?;
-
-            let socket_addr = format!("{}:{}", address, port)
-                .parse()
-                .map_err(|e| format!("Invalid address: {}", e))?;
-
-            let default_id = format!("{}-{}", service_type, address);
-            let instance_id = service
-                .get("ID")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&default_id);
-
-            let mut instance = ServiceInstance::new(service_type, instance_id, socket_addr);
-
-            // 解析标签
-            if let Some(tags_array) = service.get("Tags").and_then(|v| v.as_array()) {
-                for tag in tags_array {
-                    if let Some(tag_str) = tag.as_str() {
-                        if let Some((key, value)) = tag_str.split_once('=') {
-                            instance = instance.with_tag(key, value);
-                        } else {
-                            instance = instance.with_tag(tag_str, "true");
-                        }
-                    }
-                }
+        {
+            Ok(instances) => {
+                let mut cache = CONSUL_DISCOVER_CACHE.lock().await;
+                cache.insert(
+                    cache_key,
+                    DiscoverCacheEntry {
+                        instances: instances.clone(),
+                        fetched_at: Instant::now(),
+                    },
+                );
+                Ok(instances)
             }
-
-            // 记录实例的标签信息（用于调试）
-            let instance_tags: Vec<String> = instance
-                .tags
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect();
-            tracing::trace!(
-                service_type = %service_type,
-                instance_id = %instance.instance_id,
-                address = %instance.address,
-                tags = ?instance_tags,
-                "Found service instance from Consul"
-            );
-
-            // 过滤命名空间
-            if let Some(ns) = namespace {
-                if !instance.matches_namespace(Some(ns)) {
-                    tracing::trace!(
-                        instance_id = %instance.instance_id,
-                        namespace = %ns,
-                        "Instance filtered out by namespace"
+            Err(error) => {
+                let cache = CONSUL_DISCOVER_CACHE.lock().await;
+                if let Some(entry) = cache.get(&cache_key) {
+                    tracing::warn!(
+                        service_type = %service_type,
+                        error = %error,
+                        stale_age_secs = entry.fetched_at.elapsed().as_secs(),
+                        "Consul discover failed; using stale cached instances"
                     );
-                    continue;
+                    return Ok(entry.instances.clone());
                 }
+                Err(error)
             }
-
-            // 过滤版本
-            if let Some(ver) = version {
-                if !instance.matches_version(Some(ver)) {
-                    tracing::trace!(
-                        instance_id = %instance.instance_id,
-                        version = %ver,
-                        "Instance filtered out by version"
-                    );
-                    continue;
-                }
-            }
-
-            // 过滤标签
-            if let Some(tag_filters) = tags {
-                let tag_filter_str: Vec<String> = tag_filters
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect();
-                if !instance.matches_tags(tag_filters) {
-                    tracing::trace!(
-                        instance_id = %instance.instance_id,
-                        instance_tags = ?instance_tags,
-                        required_tags = ?tag_filter_str,
-                        "Instance filtered out by tag filters"
-                    );
-                    continue;
-                } else {
-                    tracing::trace!(
-                        instance_id = %instance.instance_id,
-                        instance_tags = ?instance_tags,
-                        required_tags = ?tag_filter_str,
-                        "Instance passed tag filters"
-                    );
-                }
-            }
-
-            instances.push(instance);
         }
-
-        tracing::debug!(
-            service_type = %service_type,
-            total_found = total_services_count,
-            filtered_count = instances.len(),
-            tag_filters = ?tags,
-            "Consul service discovery completed"
-        );
-
-        Ok(instances)
     }
 
     async fn register(
@@ -581,5 +515,156 @@ impl DiscoveryBackend for ConsulBackend {
         });
 
         Ok(rx)
+    }
+}
+
+impl ConsulBackend {
+    async fn discover_uncached(
+        &self,
+        service_type: &str,
+        namespace: Option<&str>,
+        version: Option<&str>,
+        tags: Option<&HashMap<String, String>>,
+    ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
+        let passing_only =
+            std::env::var("CONSUL_PASSING_ONLY").unwrap_or_else(|_| "false".to_string()) == "true";
+
+        let url = format!("{}/v1/health/service/{}", self.consul_url, service_type);
+        let mut query_params = vec![];
+        if passing_only {
+            query_params.push(("passing", "true"));
+        }
+
+        let resp = self
+            .http_client
+            .get(&url)
+            .query(&query_params)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let resp_text = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+        if response_is_rate_limited(status, &resp_text) {
+            return Err(format!(
+                "Consul rate limited (status={}): {}",
+                status,
+                resp_text.chars().take(120).collect::<String>()
+            )
+            .into());
+        }
+
+        tracing::trace!(
+            service_type = %service_type,
+            url = %url,
+            status = %status,
+            response_len = resp_text.len(),
+            tag_filters = ?tags,
+            "Consul service discovery response"
+        );
+
+        let services: Vec<serde_json::Value> = serde_json::from_str(&resp_text).map_err(|e| {
+            tracing::error!(
+                service_type = %service_type,
+                error = %e,
+                response_preview = %resp_text.chars().take(500).collect::<String>(),
+                "Failed to parse Consul response as JSON"
+            );
+            format!(
+                "error decoding response body: {} (response preview: {})",
+                e,
+                resp_text.chars().take(200).collect::<String>()
+            )
+        })?;
+
+        let total_services_count = services.len();
+        tracing::trace!(
+            service_type = %service_type,
+            services_count = total_services_count,
+            "Parsed Consul services"
+        );
+
+        let mut instances = Vec::new();
+        for svc in services {
+            let service = svc.get("Service").ok_or("Invalid service format")?;
+            let address = service
+                .get("Address")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing address")?;
+            let port = service
+                .get("Port")
+                .and_then(|v| v.as_u64())
+                .ok_or("Missing port")?;
+
+            let socket_addr = format!("{}:{}", address, port)
+                .parse()
+                .map_err(|e| format!("Invalid address: {}", e))?;
+
+            let default_id = format!("{}-{}", service_type, address);
+            let instance_id = service
+                .get("ID")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&default_id);
+
+            let mut instance = ServiceInstance::new(service_type, instance_id, socket_addr);
+
+            if let Some(tags_array) = service.get("Tags").and_then(|v| v.as_array()) {
+                for tag in tags_array {
+                    if let Some(tag_str) = tag.as_str() {
+                        if let Some((key, value)) = tag_str.split_once('=') {
+                            instance = instance.with_tag(key, value);
+                        } else {
+                            instance = instance.with_tag(tag_str, "true");
+                        }
+                    }
+                }
+            }
+
+            let instance_tags: Vec<String> = instance
+                .tags
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            tracing::trace!(
+                service_type = %service_type,
+                instance_id = %instance.instance_id,
+                address = %instance.address,
+                tags = ?instance_tags,
+                "Found service instance from Consul"
+            );
+
+            if let Some(ns) = namespace {
+                if !instance.matches_namespace(Some(ns)) {
+                    continue;
+                }
+            }
+
+            if let Some(ver) = version {
+                if !instance.matches_version(Some(ver)) {
+                    continue;
+                }
+            }
+
+            if let Some(tag_filters) = tags {
+                if !instance.matches_tags(tag_filters) {
+                    continue;
+                }
+            }
+
+            instances.push(instance);
+        }
+
+        tracing::debug!(
+            service_type = %service_type,
+            total_found = total_services_count,
+            filtered_count = instances.len(),
+            tag_filters = ?tags,
+            "Consul service discovery completed"
+        );
+
+        Ok(instances)
     }
 }

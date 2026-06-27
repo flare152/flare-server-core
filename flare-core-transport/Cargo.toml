@@ -15,9 +15,9 @@ default = []
 # gRPC 支持 (可选)
 grpc = ["dep:tonic", "dep:prost"]
 
-# gRPC 拦截器 / 中间件扩展路径（check-cfg）
-grpc-interceptor = []
-grpc-middleware = []
+# gRPC 拦截器 / 中间件
+grpc-interceptor = ["grpc"]
+grpc-middleware = ["grpc"]
 
 # HTTP 支持 (可选)
 http = ["dep:axum", "dep:tower-http"]
@@ -25,12 +25,13 @@ http = ["dep:axum", "dep:tower-http"]
 # 服务发现 (可选)
 discovery = ["dep:etcd-client", "dep:reqwest", "dep:tonic"]
 
-# Proto 支持
-proto = []
+# Proto 支持（HTTP 响应 ErrorDetail 桥接）
+proto = ["dep:flare-proto"]
 
 [dependencies]
 # ===== 内部依赖 =====
 flare-core-base = { workspace = true }
+flare-proto = { workspace = true, optional = true }
 flare-core-infra = { workspace = true }
 flare-core-runtime = { workspace = true }
 
@@ -52,6 +53,10 @@ http = { workspace = true }
 # ===== 序列化 (通用) =====
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# ===== 错误处理 =====
+anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # ===== 日志追踪 (通用) =====
 tracing = { workspace = true }

@@ -15,5 +15,6 @@ pub use config::{
 // 重新导出 Producer 和 Consumer
 pub use consumer::{
     NatsConsumerBuilder, NatsConsumerRuntime, NatsMessageFetcher, build_nats_consumer_tasks,
+    build_nats_consumer_tasks_with_failure_publishers,
 };
 pub use producer::{NatsProducer, NatsProducerBuilder};

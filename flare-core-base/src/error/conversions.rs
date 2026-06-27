@@ -41,6 +41,36 @@ impl From<tonic::Status> for FlareError {
     }
 }
 
+impl From<tonic::transport::Error> for FlareError {
+    fn from(err: tonic::transport::Error) -> Self {
+        FlareError::localized(
+            ErrorCode::NetworkError,
+            format!("gRPC transport error: {err}"),
+        )
+    }
+}
+
+impl From<prost::EncodeError> for FlareError {
+    fn from(err: prost::EncodeError) -> Self {
+        FlareError::serialization_error(format!("protobuf encode error: {err}"))
+    }
+}
+
+impl From<prost::DecodeError> for FlareError {
+    fn from(err: prost::DecodeError) -> Self {
+        FlareError::deserialization_error(format!("protobuf decode error: {err}"))
+    }
+}
+
+impl From<std::num::TryFromIntError> for FlareError {
+    fn from(err: std::num::TryFromIntError) -> Self {
+        FlareError::localized(
+            ErrorCode::InvalidParameter,
+            format!("integer conversion error: {err}"),
+        )
+    }
+}
+
 impl From<LocalizedError> for FlareError {
     fn from(err: LocalizedError) -> Self {
         FlareError::Localized {
@@ -74,6 +104,12 @@ impl From<redis::RedisError> for FlareError {
     }
 }
 
+impl From<sqlx::Error> for FlareError {
+    fn from(err: sqlx::Error) -> Self {
+        FlareError::localized(ErrorCode::DatabaseError, format!("database error: {err}"))
+    }
+}
+
 /// 为 anyhow::Result 提供上下文扩展
 ///
 /// 允许使用 `.context()` 和 `.with_context()` 方法将 anyhow 错误转换为 FlareError
@@ -90,21 +126,18 @@ pub trait AnyhowContext<T> {
         F: FnOnce() -> C;
 }
 
-/// 为所有可以转换为 FlareError 的错误类型提供上下文扩展
+/// 为所有可显示的错误类型提供上下文扩展
 ///
-/// 这允许任何 Result<T, E> 使用 `.context()` 方法，只要 E: Into<FlareError>
+/// 这允许任何 Result<T, E> 使用 `.context()` 方法，只要 E: Display。
 impl<T, E> AnyhowContext<T> for Result<T, E>
 where
-    E: Into<FlareError>,
+    E: std::fmt::Display,
 {
     fn context<C>(self, context: C) -> super::Result<T>
     where
         C: std::fmt::Display + Send + Sync + 'static,
     {
-        self.map_err(|err| {
-            let flare_err = err.into();
-            FlareError::system(format!("{}: {}", context, flare_err))
-        })
+        self.map_err(|err| FlareError::system(format!("{}: {}", context, err)))
     }
 
     fn with_context<C, F>(self, f: F) -> super::Result<T>
@@ -114,8 +147,24 @@ where
     {
         self.map_err(|err| {
             let context = f();
-            let flare_err = err.into();
-            FlareError::system(format!("{}: {}", context, flare_err))
+            FlareError::system(format!("{}: {}", context, err))
         })
+    }
+}
+
+impl<T> AnyhowContext<T> for Option<T> {
+    fn context<C>(self, context: C) -> super::Result<T>
+    where
+        C: std::fmt::Display + Send + Sync + 'static,
+    {
+        self.ok_or_else(|| FlareError::system(context.to_string()))
+    }
+
+    fn with_context<C, F>(self, f: F) -> super::Result<T>
+    where
+        C: std::fmt::Display + Send + Sync + 'static,
+        F: FnOnce() -> C,
+    {
+        self.ok_or_else(|| FlareError::system(f().to_string()))
     }
 }

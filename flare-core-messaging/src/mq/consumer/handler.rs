@@ -19,6 +19,28 @@ pub trait MessageHandler: Send + Sync {
     /// * `Result<MessageResult, ConsumerError>` - 处理结果
     async fn handle(&self, message: Message) -> Result<MessageResult, ConsumerError>;
 
+    /// 批量处理消息。
+    ///
+    /// 默认实现保持向后兼容：逐条调用 [Self::handle]。高吞吐消费者可以覆盖此方法，
+    /// 在一次事务或一次外部调用中完成批量处理。返回结果必须与输入消息一一对应。
+    async fn handle_batch(
+        &self,
+        messages: Vec<Message>,
+    ) -> Result<Vec<MessageResult>, ConsumerError> {
+        let mut results = Vec::with_capacity(messages.len());
+        for message in messages {
+            results.push(self.handle(message).await?);
+        }
+        Ok(results)
+    }
+
+    /// 是否支持真正的原子批量处理。
+    ///
+    /// 默认关闭，避免普通逐条 handler 在批量中部分成功后整体 NACK，造成非幂等副作用重放。
+    fn supports_batch(&self) -> bool {
+        false
+    }
+
     /// 获取处理器名称
     fn name(&self) -> &str;
 }

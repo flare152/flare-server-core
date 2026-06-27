@@ -65,13 +65,8 @@ impl<P> EventPublisher for Arc<P>
 where
     P: EventPublisher + ?Sized,
 {
-    fn publish<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        topic: &'a str,
-        envelope: &'a EventEnvelope,
-    ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
-        async move { (**self).publish(ctx, topic, envelope).await }
+    async fn publish(&self, ctx: &Ctx, topic: &str, envelope: &EventEnvelope) -> Result<()> {
+        (**self).publish(ctx, topic, envelope).await
     }
 }
 
@@ -130,25 +125,19 @@ impl<P> EventSubscriber for Arc<P>
 where
     P: EventSubscriber + ?Sized,
 {
-    fn subscribe<'a>(
-        &'a self,
-        topic: &'a str,
-        handler: Arc<dyn EventHandler>,
-    ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
-        async move { (**self).subscribe(topic, handler).await }
+    async fn subscribe(&self, topic: &str, handler: Arc<dyn EventHandler>) -> Result<()> {
+        (**self).subscribe(topic, handler).await
     }
 
-    fn subscribe_with_consumer_group<'a>(
-        &'a self,
-        topic: &'a str,
-        consumer_group: Option<&'a str>,
+    async fn subscribe_with_consumer_group(
+        &self,
+        topic: &str,
+        consumer_group: Option<&str>,
         handler: Arc<dyn EventHandler>,
-    ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
-        async move {
-            (**self)
-                .subscribe_with_consumer_group(topic, consumer_group, handler)
-                .await
-        }
+    ) -> Result<()> {
+        (**self)
+            .subscribe_with_consumer_group(topic, consumer_group, handler)
+            .await
     }
 }
 

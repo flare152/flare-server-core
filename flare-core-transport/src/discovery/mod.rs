@@ -13,7 +13,7 @@ pub mod instance;
 pub use backend::DiscoveryBackend;
 pub use config::{
     BackendType, DiscoveryConfig, HealthCheckConfig, LoadBalanceStrategy, NamespaceConfig,
-    TagFilter, VersionConfig,
+    TagFilter, VersionConfig, default_discovery_refresh_interval_secs,
 };
 pub use discover::{ChannelService, ServiceClient, ServiceDiscover, ServiceDiscoverUpdater};
 pub use factory::{DiscoveryFactory, ServiceRegistry};

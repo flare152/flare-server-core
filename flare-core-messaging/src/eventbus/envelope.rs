@@ -85,7 +85,7 @@ impl EventEnvelope {
             partition_key: self.partition_key.clone(),
             seq: self.seq,
             payload: self.payload.clone(),
-            timestamp_ms: self.timestamp_ms.unwrap_or(0),
+            occurred_at: self.timestamp_ms.unwrap_or(0) as i64,
             source: self.source.clone().unwrap_or_default(),
         };
         Ok(msg.encode_to_vec())
@@ -106,10 +106,10 @@ impl EventEnvelope {
             partition_key: msg.partition_key,
             seq: msg.seq,
             payload: msg.payload,
-            timestamp_ms: if msg.timestamp_ms == 0 {
+            timestamp_ms: if msg.occurred_at == 0 {
                 None
             } else {
-                Some(msg.timestamp_ms)
+                Some(msg.occurred_at as u64)
             },
             source: if msg.source.is_empty() {
                 None

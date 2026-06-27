@@ -16,6 +16,7 @@ use crate::discovery::backend::mesh::MeshBackend;
 use crate::discovery::{
     BackendType, DiscoveryBackend, DiscoveryConfig, HealthCheckConfig, LoadBalanceStrategy,
     ServiceDiscover, ServiceDiscoverUpdater, ServiceInstance,
+    default_discovery_refresh_interval_secs,
 };
 
 /// 服务发现工厂
@@ -136,7 +137,7 @@ impl DiscoveryFactory {
                 success_threshold: 2, // 连续成功 2 次后标记为健康
                 path: Some("/health".to_string()),
             }),
-            refresh_interval: Some(30), // 刷新间隔：30 秒（与心跳间隔一致）
+            refresh_interval: Some(default_discovery_refresh_interval_secs()),
         };
 
         Self::create_discover(config).await
@@ -214,7 +215,7 @@ impl DiscoveryFactory {
                 success_threshold: 2,
                 path: Some("/health".to_string()),
             }),
-            refresh_interval: Some(30),
+            refresh_interval: Some(default_discovery_refresh_interval_secs()),
         };
 
         let backend = Self::create_backend(&config).await?;
@@ -292,21 +293,41 @@ impl ServiceRegistry {
         tokio::spawn(async move {
             let mut interval_timer = interval(Duration::from_secs(interval_secs));
             let mut shutdown_rx = shutdown_rx;
+            let mut consecutive_failures = 0u64;
 
             // 立即发送一次心跳，确保服务注册后立即更新 TTL 状态
             match backend_clone.heartbeat(&instance_clone).await {
                 Ok(_) => {
+                    consecutive_failures = 0;
                     tracing::trace!(
                         instance_id = %instance_clone.instance_id,
                         "💓 Initial heartbeat sent"
                     );
                 }
                 Err(e) => {
+                    consecutive_failures += 1;
                     tracing::warn!(
                         instance_id = %instance_clone.instance_id,
+                        consecutive_failures,
                         error = %e,
                         "⚠️ Failed to send initial heartbeat"
                     );
+                    match backend_clone.register(instance_clone.clone()).await {
+                        Ok(_) => {
+                            consecutive_failures = 0;
+                            tracing::info!(
+                                instance_id = %instance_clone.instance_id,
+                                "✅ Service re-registered after initial heartbeat failure"
+                            );
+                        }
+                        Err(register_error) => {
+                            tracing::error!(
+                                instance_id = %instance_clone.instance_id,
+                                error = %register_error,
+                                "❌ Failed to re-register service after initial heartbeat failure"
+                            );
+                        }
+                    }
                 }
             }
 
@@ -317,17 +338,45 @@ impl ServiceRegistry {
                         // 各后端自行实现最适合的心跳方式
                         match backend_clone.heartbeat(&instance_clone).await {
                             Ok(_) => {
+                                if consecutive_failures > 0 {
+                                    tracing::info!(
+                                        instance_id = %instance_clone.instance_id,
+                                        recovered_after_failures = consecutive_failures,
+                                        "✅ Service heartbeat recovered"
+                                    );
+                                }
+                                consecutive_failures = 0;
                                 tracing::trace!(
                                     instance_id = %instance_clone.instance_id,
                                     "💓 Heartbeat sent"
                                 );
                             }
                             Err(e) => {
+                                consecutive_failures += 1;
                                 error!(
                                     instance_id = %instance_clone.instance_id,
+                                    consecutive_failures,
                                     error = %e,
                                     "❌ Failed to send heartbeat"
                                 );
+                                match backend_clone.register(instance_clone.clone()).await {
+                                    Ok(_) => {
+                                        tracing::warn!(
+                                            instance_id = %instance_clone.instance_id,
+                                            recovered_after_failures = consecutive_failures,
+                                            "✅ Service re-registered after heartbeat failure"
+                                        );
+                                        consecutive_failures = 0;
+                                    }
+                                    Err(register_error) => {
+                                        error!(
+                                            instance_id = %instance_clone.instance_id,
+                                            consecutive_failures,
+                                            error = %register_error,
+                                            "❌ Failed to re-register service after heartbeat failure"
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -357,7 +406,7 @@ impl ServiceRegistry {
 
     /// 手动发送心跳（通常不需要，自动心跳会处理）
     pub async fn heartbeat(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.backend.register(self.instance.clone()).await
+        self.backend.heartbeat(&self.instance).await
     }
 
     /// 更新服务实例信息（如健康状态、权重等）

@@ -28,6 +28,34 @@ pub use flare_error::FlareError as FlareServerError;
 /// 基础设施层默认使用的结果类型
 pub type InfraResult<T> = anyhow::Result<T>;
 
+/// 将内部错误映射为系统错误，供服务 handler 层统一使用。
+#[inline]
+pub fn to_system_err(e: impl std::fmt::Display) -> FlareError {
+    FlareError::system(format!("Internal error: {e}"))
+}
+
+/// 带上下文的系统错误映射，供 MQ 发布、RPC 调用等基础设施边界统一使用。
+#[inline]
+pub fn to_system_err_with(e: impl std::fmt::Display, context: &str) -> FlareError {
+    FlareError::system(format!("{context}: {e}"))
+}
+
+/// 上下文取消 / deadline 与统一错误的桥接。
+#[inline]
+pub fn map_context_error(e: crate::context::ContextError) -> FlareError {
+    ErrorBuilder::new(ErrorCode::GeneralError, "context check failed")
+        .details(e.to_string())
+        .build_error()
+}
+
+/// 要求已认证用户 ID（Command / Query / 仓储侧）。
+#[inline]
+pub fn require_user_id(ctx: &crate::context::Context) -> Result<String> {
+    ctx.user_id().map(|s| s.to_string()).ok_or_else(|| {
+        ErrorBuilder::new(ErrorCode::AuthenticationRequired, "user_id is required").build_error()
+    })
+}
+
 /// 将基础设施错误转换为 `FlareError`
 pub fn map_infra_error<E, S>(error: E, code: ErrorCode, message: S) -> FlareError
 where

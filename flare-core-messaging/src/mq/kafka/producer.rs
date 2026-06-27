@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use futures_util::future::try_join_all;
 use rdkafka::ClientConfig;
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -126,7 +127,7 @@ impl Producer for KafkaProducer {
         ctx: &flare_core_base::context::Ctx,
         messages: Vec<ProducerMessage>,
     ) -> Result<(), ProducerError> {
-        for message in messages {
+        let sends = messages.into_iter().map(|message| async move {
             self.send(
                 ctx,
                 &message.topic,
@@ -134,9 +135,9 @@ impl Producer for KafkaProducer {
                 message.payload,
                 Some(message.headers),
             )
-            .await?;
-        }
-        Ok(())
+            .await
+        });
+        try_join_all(sends).await.map(|_| ())
     }
 
     fn name(&self) -> &str {

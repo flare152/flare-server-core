@@ -3,15 +3,55 @@
 use flare_core_base::context::Ctx;
 use tonic::{Request, Status};
 
+use crate::grpc::middleware::context::get_context;
+use crate::grpc::utils::metadata_codec::decode_context_from_metadata;
+
 // -----------------------------------------------------------------------------
 // gRPC Request 提取函数
 // -----------------------------------------------------------------------------
 
+/// 合并 extensions（ContextLayer 注入）与 metadata 解码结果，优先保留非空的 user/tenant。
+fn merge_request_context<T>(req: &Request<T>) -> Option<Ctx> {
+    let from_extensions = get_context(req).cloned();
+    let from_metadata = decode_context_from_metadata(req.metadata());
+
+    match (from_extensions, from_metadata) {
+        (Some(ext), Some(md)) => {
+            let mut merged = (*ext).clone();
+            if merged.user_id().is_none_or(|u| u.is_empty()) {
+                if let Some(uid) = md.user_id().filter(|u| !u.is_empty()) {
+                    merged = merged.with_user_id(uid);
+                }
+            }
+            if merged.tenant_id().is_none_or(|t| t.is_empty()) {
+                if let Some(tid) = md.tenant_id().filter(|t| !t.is_empty()) {
+                    merged = merged.with_tenant_id(tid);
+                }
+            }
+            if merged.trace_id().is_empty() {
+                let trace = md.trace_id();
+                if !trace.is_empty() {
+                    merged = merged.with_trace_id(trace);
+                }
+            }
+            if merged.device_id().is_none_or(|d| d.is_empty()) {
+                if let Some(device) = md.device_id().filter(|d| !d.is_empty()) {
+                    merged = merged.with_device_id(device);
+                }
+            }
+            Some(std::sync::Arc::new(merged))
+        }
+        (Some(ext), None) => Some(ext),
+        (None, Some(md)) => Some(md),
+        (None, None) => None,
+    }
+}
+
 /// 从 gRPC Request 提取 Ctx（必需版本）
 ///
-/// 如果 Request 中没有 Context 信息,返回错误。
+/// 优先使用 ContextLayer 注入的 extensions，并与 metadata 合并。
 pub fn require_ctx_from_request<T>(req: &Request<T>) -> Result<Ctx, Status> {
-    crate::grpc::utils::metadata_codec::decode_context_from_metadata(req.metadata())
+    merge_request_context(req)
         .ok_or_else(|| Status::internal("Context not found in request metadata"))
 }
 
@@ -19,7 +59,7 @@ pub fn require_ctx_from_request<T>(req: &Request<T>) -> Result<Ctx, Status> {
 ///
 /// 如果 Request 中没有 Context 信息,返回 None。
 pub fn extract_ctx_from_request_opt<T>(req: &Request<T>) -> Option<Ctx> {
-    crate::grpc::utils::metadata_codec::decode_context_from_metadata(req.metadata())
+    merge_request_context(req)
 }
 
 /// 从 gRPC Request 中提取租户ID（便捷函数,必需版本）

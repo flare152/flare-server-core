@@ -6,6 +6,10 @@ use super::{Task, TaskResult};
 use std::future::Future;
 use std::pin::Pin;
 
+type ShutdownReceiver = tokio::sync::oneshot::Receiver<()>;
+type TaskFuture = Pin<Box<dyn Future<Output = TaskResult> + Send>>;
+type TaskFutureFactory = Box<dyn FnOnce(ShutdownReceiver) -> TaskFuture + Send + 'static>;
+
 /// Spawn 任务
 ///
 /// 用于包装已经构建好的 Future（例如 gRPC server）
@@ -67,13 +71,7 @@ pub struct SpawnTask {
     /// Future 构建函数
     ///
     /// 使用闭包延迟构建 Future，以便在 run 时传入 shutdown_rx
-    future_fn: Box<
-        dyn FnOnce(
-                tokio::sync::oneshot::Receiver<()>,
-            ) -> Pin<Box<dyn Future<Output = TaskResult> + Send>>
-            + Send
-            + 'static,
-    >,
+    future_fn: TaskFutureFactory,
 }
 
 impl SpawnTask {

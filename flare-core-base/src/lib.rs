@@ -14,6 +14,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod i18n;
+pub mod id;
 pub mod types;
 pub mod utils;
 
@@ -39,6 +40,9 @@ pub use i18n::{I18n, default_en_us_translations, default_zh_cn_translations};
 
 // Re-exports - Types
 pub use types::{ServiceInfo, ServiceType};
+
+// Re-exports - ID
+pub use id::{SnowflakeError, SnowflakeGenerator};
 
 /// Prelude module - 常用类型导入
 pub mod prelude {

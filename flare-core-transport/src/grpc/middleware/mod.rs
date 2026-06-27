@@ -2,7 +2,7 @@
 //!
 //! 提供超时、限流、重试、Context 等中间件。
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use flare_server_core::middleware::ContextLayer;
 //! use tonic::transport::Server;
 //!

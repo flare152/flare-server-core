@@ -10,7 +10,7 @@ use tonic::{Request as TonicRequest, Status};
 use tower::{Layer, Service};
 use tracing::{debug, warn};
 
-use crate::client::metadata_codec::decode_context_from_metadata;
+use crate::grpc::utils::decode_context_from_metadata;
 use flare_core_base::context::{Context, Ctx};
 use http::Request as HttpRequest;
 

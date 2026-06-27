@@ -205,10 +205,10 @@ impl TokenService {
     pub fn validate_token(&self, token: &str) -> Result<TokenClaims> {
         let claims = self.decode_claims(token)?;
 
-        if let Some(store) = self.store.as_ref() {
-            if store.is_revoked(&claims.jti)? {
-                return Err(anyhow!("token revoked"));
-            }
+        if let Some(store) = self.store.as_ref()
+            && store.is_revoked(&claims.jti)?
+        {
+            return Err(anyhow!("token revoked"));
         }
 
         Ok(claims)

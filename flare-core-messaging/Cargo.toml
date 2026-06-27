@@ -16,21 +16,22 @@ default = ["mq", "eventbus"]
 mq = []
 
 # NATS JetStream 支持
-nats = ["mq", "dep:async-nats"]
+nats = ["mq", "dep:async-nats", "dep:prometheus"]
 
 # Apache Kafka 支持
-kafka = ["mq", "dep:rdkafka"]
+kafka = ["mq", "dep:rdkafka", "dep:prometheus"]
 
 # 事件总线
 eventbus = []
 
-# Protobuf 载荷路径（check-cfg / 可选序列化分支）
-proto = []
+# Protobuf 载荷路径（EventBusEnvelope 序列化分支）
+proto = ["dep:flare-proto"]
 
 [dependencies]
 # ===== 内部依赖 =====
 flare-core-base = { workspace = true }
 flare-core-runtime = { workspace = true }
+flare-proto = { workspace = true, optional = true }
 
 # ===== 异步运行时 =====
 tokio = { workspace = true }
@@ -56,6 +57,7 @@ anyhow = { workspace = true }
 
 # ===== 日志追踪 =====
 tracing = { workspace = true }
+prometheus = { workspace = true, optional = true }
 
 # ===== 工具 =====
 chrono = { workspace = true }

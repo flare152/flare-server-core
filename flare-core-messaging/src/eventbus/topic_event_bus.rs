@@ -42,12 +42,7 @@ impl<P> TopicEventBus for Arc<P>
 where
     P: TopicEventBus + ?Sized,
 {
-    fn publish<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        topic: &'a str,
-        envelope: &'a EventEnvelope,
-    ) -> impl std::future::Future<Output = Result<()>> + Send + 'a {
-        async move { (**self).publish(ctx, topic, envelope).await }
+    async fn publish(&self, ctx: &Ctx, topic: &str, envelope: &EventEnvelope) -> Result<()> {
+        (**self).publish(ctx, topic, envelope).await
     }
 }

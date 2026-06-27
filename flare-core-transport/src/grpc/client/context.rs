@@ -12,8 +12,8 @@ use flare_core_base::context::Context;
 /// # 示例
 ///
 /// ```rust,no_run
-/// use flare_server_core::context::Context;
-/// use flare_server_core::client::set_context_metadata;
+/// use flare_core_base::context::Context;
+/// use flare_core_transport::grpc::client::set_context_metadata;
 /// use tonic::Request;
 ///
 /// let ctx = Context::with_request_id("req-123").with_tenant_id("tenant-456");

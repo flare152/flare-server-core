@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{AuthInterceptor, LoggingInterceptor, TracingInterceptor};
-use crate::auth::TokenService;
+use flare_core_infra::auth::TokenService;
 use tonic::{Request, Status};
 
 /// 组合拦截器

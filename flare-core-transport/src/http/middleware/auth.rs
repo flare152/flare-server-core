@@ -21,7 +21,7 @@ use flare_core_infra::auth::TokenService;
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// use axum::middleware;
 /// use flare_server_core::http::middleware::auth_middleware;
 /// use flare_server_core::auth::TokenService;

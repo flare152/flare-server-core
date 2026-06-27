@@ -61,30 +61,30 @@ pub fn ctx_to_map(ctx: &Ctx) -> HashMap<String, String> {
     if !ctx.trace_id().is_empty() {
         map.insert(keys::TRACE_ID.to_string(), ctx.trace_id().to_string());
     }
-    if let Some(t) = ctx.tenant_id() {
-        if !t.is_empty() {
-            map.insert(keys::TENANT_ID.to_string(), t.to_string());
-        }
+    if let Some(t) = ctx.tenant_id()
+        && !t.is_empty()
+    {
+        map.insert(keys::TENANT_ID.to_string(), t.to_string());
     }
-    if let Some(u) = ctx.user_id() {
-        if !u.is_empty() {
-            map.insert(keys::USER_ID.to_string(), u.to_string());
-        }
+    if let Some(u) = ctx.user_id()
+        && !u.is_empty()
+    {
+        map.insert(keys::USER_ID.to_string(), u.to_string());
     }
-    if let Some(d) = ctx.device_id() {
-        if !d.is_empty() {
-            map.insert(keys::DEVICE_ID.to_string(), d.to_string());
-        }
+    if let Some(d) = ctx.device_id()
+        && !d.is_empty()
+    {
+        map.insert(keys::DEVICE_ID.to_string(), d.to_string());
     }
-    if let Some(p) = ctx.platform() {
-        if !p.is_empty() {
-            map.insert(keys::PLATFORM.to_string(), p.to_string());
-        }
+    if let Some(p) = ctx.platform()
+        && !p.is_empty()
+    {
+        map.insert(keys::PLATFORM.to_string(), p.to_string());
     }
-    if let Some(s) = ctx.session_id() {
-        if !s.is_empty() {
-            map.insert(keys::SESSION_ID.to_string(), s.to_string());
-        }
+    if let Some(s) = ctx.session_id()
+        && !s.is_empty()
+    {
+        map.insert(keys::SESSION_ID.to_string(), s.to_string());
     }
 
     // Actor 信息
@@ -181,10 +181,10 @@ fn decode_actor_from_map(map: &HashMap<String, String>) -> Option<ActorContext> 
 
     let prefix = "x-actor-attr-";
     for (key, value) in map.iter() {
-        if let Some(attr_key) = key.strip_prefix(prefix) {
-            if !value.is_empty() {
-                actor = actor.with_attribute(attr_key, value.as_str());
-            }
+        if let Some(attr_key) = key.strip_prefix(prefix)
+            && !value.is_empty()
+        {
+            actor = actor.with_attribute(attr_key, value.as_str());
         }
     }
 

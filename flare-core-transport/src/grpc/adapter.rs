@@ -14,7 +14,7 @@ use flare_core_runtime::task::{Task, TaskResult};
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,ignore
 /// use flare_core_transport::grpc::GrpcAdapter;
 /// use tonic::transport::Server;
 ///

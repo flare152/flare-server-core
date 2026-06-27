@@ -10,8 +10,8 @@ repository.workspace = true
 
 [features]
 default = []
-# 供 `check-cfg` 与可选 Protobuf/错误桥接路径使用（与 tonic/grpc 集成解耦）
-proto = []
+# Protobuf 错误桥接：FlareError ↔ flare_proto ErrorDetail，gRPC Status details 携带结构化错误
+proto = ["dep:flare-proto", "dep:bytes"]
 
 [dependencies]
 # 异步运行时
@@ -20,6 +20,11 @@ tokio-util = { workspace = true }
 
 # gRPC (用于错误转换)
 tonic = { workspace = true }
+prost = { workspace = true }
+
+# Proto 错误桥接（proto feature）
+flare-proto = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 
 # 序列化
 serde = { workspace = true, features = ["derive"] }
@@ -39,6 +44,7 @@ uuid = { workspace = true }
 
 # 存储 (用于错误转换)
 redis = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

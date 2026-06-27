@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_nats::jetstream;
 use async_nats::jetstream::Message as NatsMessage;
@@ -11,8 +12,10 @@ use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use async_nats::jetstream::consumer::pull::Stream as PullStream;
 use futures_util::StreamExt;
 
+use super::super::process_ack_metrics::record_process_ack;
 use super::config::{NatsConsumerConfig, NatsStreamSpec, resolve_subject_stream};
 use crate::mq::consumer::dispatcher::Dispatcher;
+use crate::mq::consumer::failure::{ConsumerFailurePublishers, retry_count_from_headers};
 use crate::mq::consumer::{
     ConsumerConfig, ConsumerError, ConsumerRuntimeTask, ContentType, Message, MessageAck,
     MessageContext, MessageFetcher, MqConsumerTask,
@@ -193,6 +196,26 @@ pub async fn build_nats_consumer_tasks<C>(
 where
     C: NatsConsumerConfig + Send + Sync,
 {
+    build_nats_consumer_tasks_with_failure_publishers(
+        config,
+        consumer_config,
+        dispatcher,
+        task_name_prefix,
+        ConsumerFailurePublishers::default(),
+    )
+    .await
+}
+
+pub async fn build_nats_consumer_tasks_with_failure_publishers<C>(
+    config: &C,
+    consumer_config: ConsumerConfig,
+    dispatcher: Arc<dyn Dispatcher>,
+    task_name_prefix: impl AsRef<str>,
+    failure_publishers: ConsumerFailurePublishers,
+) -> Result<Vec<MqConsumerTask>, ConsumerError>
+where
+    C: NatsConsumerConfig + Send + Sync,
+{
     let mut subjects = dispatcher.topics();
     if subjects.is_empty() {
         return Err(ConsumerError::Configuration(
@@ -210,8 +233,12 @@ where
     for (stream_name, (stream, stream_subjects)) in grouped {
         let resolved_config = ResolvedNatsConsumerConfig::from_config(config, stream);
         let fetcher = NatsMessageFetcher::new(&resolved_config, stream_subjects.clone()).await?;
-        let consumer =
-            ConsumerRuntimeTask::from_parts(consumer_config.clone(), dispatcher.clone(), fetcher);
+        let consumer = ConsumerRuntimeTask::from_parts_with_failure_publishers(
+            consumer_config.clone(),
+            dispatcher.clone(),
+            fetcher,
+            failure_publishers.clone(),
+        );
         let task_name = format!("{}-{}", task_name_prefix, sanitize_task_part(&stream_name));
         tasks.push(MqConsumerTask::new(task_name, Box::new(consumer)));
     }
@@ -367,6 +394,7 @@ impl NatsMessageFetcher {
             .get("content-type")
             .and_then(|v| ContentType::from_str(v))
             .unwrap_or(ContentType::Json);
+        let retry_count = retry_count_from_headers(&headers);
 
         let message_context = MessageContext {
             ctx,
@@ -377,7 +405,7 @@ impl NatsMessageFetcher {
             key,
             headers,
             started_at: std::time::Instant::now(),
-            retry_count: 0,
+            retry_count,
             metadata: HashMap::new(),
         };
 
@@ -479,27 +507,66 @@ struct NatsMessageAck {
     message: NatsMessage,
 }
 
+fn record_nats_process_ack(
+    operation: &'static str,
+    started_at: Instant,
+    result: &Result<(), ConsumerError>,
+) {
+    let outcome = if result.is_ok() { "success" } else { "error" };
+    record_process_ack("jetstream", operation, outcome, started_at.elapsed());
+
+    match result {
+        Ok(()) => {
+            tracing::trace!(
+                backend = "jetstream",
+                operation,
+                "JetStream consumer process ack operation completed"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                backend = "jetstream",
+                operation,
+                error = %error,
+                "JetStream consumer process ack operation failed"
+            );
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl MessageAck for NatsMessageAck {
     async fn ack(&self) -> Result<(), ConsumerError> {
-        self.message
+        let started_at = Instant::now();
+        let result = self
+            .message
             .ack()
             .await
-            .map_err(|e| ConsumerError::Connection(e.to_string()))
+            .map_err(|e| ConsumerError::Connection(e.to_string()));
+        record_nats_process_ack("ack", started_at, &result);
+        result
     }
 
     async fn nack(&self) -> Result<(), ConsumerError> {
-        self.message
+        let started_at = Instant::now();
+        let result = self
+            .message
             .ack_with(jetstream::AckKind::Nak(None))
             .await
-            .map_err(|e| ConsumerError::Connection(e.to_string()))
+            .map_err(|e| ConsumerError::Connection(e.to_string()));
+        record_nats_process_ack("nack", started_at, &result);
+        result
     }
 
     async fn term(&self) -> Result<(), ConsumerError> {
-        self.message
+        let started_at = Instant::now();
+        let result = self
+            .message
             .ack_with(jetstream::AckKind::Term)
             .await
-            .map_err(|e| ConsumerError::Connection(e.to_string()))
+            .map_err(|e| ConsumerError::Connection(e.to_string()));
+        record_nats_process_ack("term", started_at, &result);
+        result
     }
 }
 

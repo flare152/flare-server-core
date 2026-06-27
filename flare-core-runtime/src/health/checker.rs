@@ -7,6 +7,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
 
+type HealthFailureCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// 健康检查结果
 #[derive(Debug, Clone)]
 pub struct HealthCheckResult {
@@ -38,7 +40,7 @@ pub struct HealthChecker {
     checks: Vec<Arc<dyn HealthCheck>>,
     failure_counts: Arc<RwLock<std::collections::HashMap<String, u32>>>,
     failure_threshold: u32,
-    on_failure: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    on_failure: Option<HealthFailureCallback>,
 }
 
 impl HealthChecker {
@@ -59,7 +61,7 @@ impl HealthChecker {
     }
 
     /// 设置失败回调
-    pub fn with_on_failure(mut self, callback: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+    pub fn with_on_failure(mut self, callback: HealthFailureCallback) -> Self {
         self.on_failure = Some(callback);
         self
     }

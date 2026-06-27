@@ -14,7 +14,9 @@ use tower::Service;
 use tower::discover::Change;
 
 use crate::discovery::backend::DiscoveryBackend;
-use crate::discovery::config::{DiscoveryConfig, TagFilter};
+use crate::discovery::config::{
+    DiscoveryConfig, TagFilter, default_discovery_refresh_interval_secs,
+};
 use crate::discovery::instance::ServiceInstance;
 
 /// 将配置中的 tag_filters 转为 backend.discover() 所需的 HashMap。
@@ -211,14 +213,12 @@ impl ServiceDiscover {
             .unwrap_or("")
             .to_string();
 
-        let interval = config.refresh_interval.unwrap_or(30);
-        let instances_immediate = self.instances.clone();
+        let interval = config
+            .refresh_interval
+            .unwrap_or_else(default_discovery_refresh_interval_secs);
         let instances_interval = self.instances.clone();
-        let backend_clone = backend.clone();
-        let updater_clone = updater.clone();
-        let service_type_clone = service_type.clone();
         let tags_ref = tag_filters_to_map(&config);
-        let tags_immediate = tags_ref.clone();
+        let tags_interval = tags_ref.clone();
         let namespace = config
             .namespace
             .as_ref()
@@ -229,44 +229,13 @@ impl ServiceDiscover {
             .as_ref()
             .and_then(|v| v.default.as_deref())
             .map(String::from);
-        let namespace_immediate = namespace.clone();
-        let version_immediate = version.clone();
-
-        // 立即执行一次服务发现，不等待第一次 interval
-        tokio::spawn(async move {
-            // 立即执行一次服务发现（传入 tag_filters）
-            let ns = namespace_immediate.as_deref();
-            let ver = version_immediate.as_deref();
-            if let Ok(new_instances) = backend_clone
-                .discover(&service_type_clone, ns, ver, tags_immediate.as_ref())
-                .await
-            {
-                let mut current = instances_immediate.write().await;
-                let new_map: HashMap<String, ServiceInstance> = new_instances
-                    .into_iter()
-                    .map(|inst| (inst.instance_id.clone(), inst))
-                    .collect();
-
-                // 检测变化并发送到 updater
-                for (id, new_inst) in &new_map {
-                    if !current.contains_key(id) {
-                        // 新增：创建 Channel 并缓存
-                        if let Ok(service) = updater_clone.create_channel_service(new_inst).await {
-                            let _ = updater_clone.insert(id.clone(), service).await;
-                        }
-                        current.insert(id.clone(), new_inst.clone());
-                    }
-                }
-            }
-        });
-
-        let tags_interval = tags_ref.clone();
         let namespace_interval = namespace.clone();
         let version_interval = version.clone();
+
         tokio::spawn(async move {
             let mut interval_timer =
                 tokio::time::interval(tokio::time::Duration::from_secs(interval));
-            // 跳过第一次 tick，因为我们已经立即执行了一次
+            // from_backend 已做过首次 discover；跳过 interval 的第一次立即 tick。
             interval_timer.tick().await;
 
             loop {

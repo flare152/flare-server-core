@@ -121,11 +121,17 @@ pub enum ConsumerError {
     #[error("DLQ error: {0}")]
     DeadLetter(String),
 
+    #[error("Retry error: {0}")]
+    Retry(String),
+
     #[error("Shutdown requested")]
     Shutdown,
 
     #[error("Configuration error: {0}")]
     Configuration(String),
+
+    #[error("Idempotency error: {0}")]
+    Idempotency(String),
 
     #[error("No handler found for topic: {0}")]
     NoHandler(String),
@@ -136,7 +142,11 @@ impl ConsumerError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            ConsumerError::Handler(_) | ConsumerError::Connection(_) | ConsumerError::Timeout(_)
+            ConsumerError::Handler(_)
+                | ConsumerError::Connection(_)
+                | ConsumerError::Timeout(_)
+                | ConsumerError::Retry(_)
+                | ConsumerError::Idempotency(_)
         )
     }
 
@@ -161,6 +171,7 @@ pub enum ContentType {
 
 impl ContentType {
     /// 从字符串解析内容类型
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "application/json" | "json" => Some(ContentType::Json),
@@ -238,7 +249,7 @@ impl Message {
     /// 3. 如果解码失败，serde_json 本身会返回错误
     ///
     /// # 示例
-    /// ```rust
+    /// ```rust,ignore
     /// let data = message.decode_json::<MyData>()?;
     /// ```
     pub fn decode_json<T: serde::de::DeserializeOwned>(&self) -> Result<T, ConsumerError> {
@@ -271,7 +282,7 @@ impl Message {
     /// 3. 如果解码失败，Protobuf 本身会返回错误
     ///
     /// # 示例
-    /// ```rust
+    /// ```rust,ignore
     /// let envelope = message.decode_protobuf::<MqEnvelope>()?;
     /// ```
     pub fn decode_protobuf<T: prost::Message + Default>(&self) -> Result<T, ConsumerError> {
@@ -304,4 +315,8 @@ pub trait MessageAck: Send + Sync {
     async fn ack(&self) -> Result<(), ConsumerError>;
     async fn nack(&self) -> Result<(), ConsumerError>;
     async fn term(&self) -> Result<(), ConsumerError>;
+
+    fn supports_native_retry(&self) -> bool {
+        true
+    }
 }

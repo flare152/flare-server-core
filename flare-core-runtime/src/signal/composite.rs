@@ -44,6 +44,7 @@ impl CompositeSignal {
     }
 
     /// 添加信号
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, signal: Box<dyn ShutdownSignal>) -> Self {
         self.signals.push(signal);
         self

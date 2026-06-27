@@ -13,6 +13,7 @@
 
 pub mod adapter;
 pub mod dispatcher;
+pub mod failure;
 pub mod handler;
 pub mod runtime;
 pub mod task;
@@ -21,6 +22,11 @@ pub mod types;
 // 重新导出核心类型
 pub use adapter::{MqConsumerAdapter, MqConsumerAdapterBuilder};
 pub use dispatcher::{Dispatcher, RegistryDispatcher, TopicDispatcher};
+pub use failure::{
+    ConsumerFailurePublishers, DeadLetterPublisher, FailureAction, FailureContext, FailureTopic,
+    ProducerDeadLetterPublisher, ProducerRetryPublisher, RetryForwarderHandler, RetryPolicy,
+    RetryPublisher,
+};
 pub use handler::{HandlerRegistry, MessageHandler};
 pub use runtime::{
     ConsumerConfig, ConsumerRuntime, ConsumerRuntimeTask, ConsumerStats, MessageFetcher,

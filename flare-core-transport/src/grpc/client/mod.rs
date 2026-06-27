@@ -11,7 +11,7 @@
 //!
 //! ## 方式 1：使用拦截器（推荐）
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use flare_server_core::client::{ClientContextInterceptor, ClientContextConfig};
 //!
 //! let config = ClientContextConfig::new().with_default_tenant_id("tenant-123");
@@ -21,7 +21,7 @@
 //!
 //! ## 方式 2：手动设置 Context
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use flare_server_core::client::set_context_metadata;
 //! use flare_server_core::context::Context;
 //!

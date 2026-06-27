@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use flare_core_base::error::{ErrorBuilder, ErrorCode, FlareError};
 
 /// 生产者 Trait
 #[async_trait]
@@ -112,6 +113,48 @@ pub enum ProducerError {
     Batch(String),
 }
 
+impl ProducerError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ProducerError::Connection(_) => "connection",
+            ProducerError::Serialization(_) => "serialization",
+            ProducerError::Timeout(_) => "timeout",
+            ProducerError::Configuration(_) => "configuration",
+            ProducerError::Send(_) => "send",
+            ProducerError::Batch(_) => "batch",
+        }
+    }
+
+    pub fn error_code(&self) -> ErrorCode {
+        match self {
+            ProducerError::Connection(_)
+            | ProducerError::Timeout(_)
+            | ProducerError::Send(_)
+            | ProducerError::Batch(_) => ErrorCode::ServiceUnavailable,
+            ProducerError::Serialization(_) => ErrorCode::SerializationError,
+            ProducerError::Configuration(_) => ErrorCode::ConfigurationError,
+        }
+    }
+
+    pub fn default_reason(&self) -> &'static str {
+        match self {
+            ProducerError::Connection(_) => "message broker connection unavailable",
+            ProducerError::Serialization(_) => "message broker payload serialization failed",
+            ProducerError::Timeout(_) => "message broker publish timed out",
+            ProducerError::Configuration(_) => "message broker producer is misconfigured",
+            ProducerError::Send(_) => "message broker publish failed",
+            ProducerError::Batch(_) => "message broker batch publish failed",
+        }
+    }
+
+    pub fn into_flare_error(self) -> FlareError {
+        ErrorBuilder::new(self.error_code(), self.default_reason())
+            .details(self.to_string())
+            .param("producer_error_kind", self.kind())
+            .build_error()
+    }
+}
+
 /// 生产者配置
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {
@@ -178,5 +221,38 @@ impl ProducerConfig {
     pub fn with_retries(mut self, retries: u32) -> Self {
         self.retries = retries;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_producer_errors_map_to_retryable_service_unavailable() {
+        let errors = [
+            ProducerError::Connection("nats disconnected".to_string()),
+            ProducerError::Timeout("publish ack timeout".to_string()),
+            ProducerError::Send("broker unavailable".to_string()),
+            ProducerError::Batch("batch publish failed".to_string()),
+        ];
+
+        for error in errors {
+            let mapped = error.into_flare_error();
+            assert_eq!(mapped.code(), Some(ErrorCode::ServiceUnavailable));
+            assert!(mapped.is_retryable());
+        }
+    }
+
+    #[test]
+    fn non_transient_producer_errors_keep_non_retryable_codes() {
+        let serialization = ProducerError::Serialization("bad payload".into()).into_flare_error();
+        assert_eq!(serialization.code(), Some(ErrorCode::SerializationError));
+        assert!(!serialization.is_retryable());
+
+        let configuration =
+            ProducerError::Configuration("missing broker url".into()).into_flare_error();
+        assert_eq!(configuration.code(), Some(ErrorCode::ConfigurationError));
+        assert!(!configuration.is_retryable());
     }
 }

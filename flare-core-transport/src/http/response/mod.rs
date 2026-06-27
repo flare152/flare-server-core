@@ -96,7 +96,7 @@ impl<T> ApiResponse<T> {
 /// 从 FlareError 转换为 ApiResponse
 ///
 /// 转换规则:
-/// - 基础 HTTP 错误码 (10000-10999): 保持原样
+/// - HTTP 错误码 (400-599): 保持原样
 /// - 其他错误码: 统一转换为 500 (HttpInternalServerError)
 impl<T> From<FlareError> for ApiResponse<T> {
     fn from(err: FlareError) -> Self {
@@ -123,11 +123,9 @@ impl<T> From<FlareError> for ApiResponse<T> {
             ),
         };
 
-        // 判断是否为 HTTP 基础错误码 (10000-10999)
-        let final_code = if original_code >= 10000 && original_code <= 10999 {
+        let final_code = if is_http_error_code(original_code) {
             original_code
         } else {
-            // 非 HTTP 基础错误码,统一转换为 500
             ErrorCode::HttpInternalServerError as i32
         };
 
@@ -141,12 +139,15 @@ impl<T> From<FlareError> for ApiResponse<T> {
     }
 }
 
+fn is_http_error_code(code: i32) -> bool {
+    (400..=599).contains(&code)
+}
+
 #[cfg(feature = "proto")]
 impl<T> ApiResponse<T> {
     /// 从 ProtoErrorDetail 转换
     pub fn from_proto_error(detail: &ProtoErrorDetail) -> Self {
-        // 判断是否为 HTTP 基础错误码
-        let final_code = if detail.code >= 10000 && detail.code <= 10999 {
+        let final_code = if is_http_error_code(detail.code) {
             detail.code
         } else {
             ErrorCode::HttpInternalServerError as i32
@@ -243,7 +244,7 @@ mod tests {
     fn test_from_flare_error_with_non_http_code() {
         // 非 HTTP 错误码应转换为 500
         let err = FlareError::Localized {
-            code: ErrorCode::InvalidArgument,
+            code: ErrorCode::InvalidParameter,
             reason: "validation".to_string(),
             details: Some("Field is required".to_string()),
             params: None,

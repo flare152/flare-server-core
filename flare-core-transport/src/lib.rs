@@ -27,16 +27,6 @@ pub mod http;
 #[cfg(feature = "discovery")]
 pub mod discovery;
 
-// Re-exports - gRPC
-#[cfg(feature = "grpc")]
-pub use grpc::{
-    ExponentialBackoffPolicy, FixedRetryPolicy, RetryPolicy, client::*, health::*, interceptor::*,
-    middleware::*, retry::*, utils::*,
-};
-
-#[cfg(feature = "http")]
-pub use http::{middleware::*, response::*};
-
 #[cfg(feature = "discovery")]
 pub use discovery::{
     DiscoveryBackend, DiscoveryConfig, DiscoveryFactory, ServiceDiscover, ServiceInstance,

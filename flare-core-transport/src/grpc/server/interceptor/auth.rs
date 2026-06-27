@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::auth::TokenService;
+use flare_core_infra::auth::TokenService;
 use tonic::{Request, Status};
 use tracing::{debug, error};
 

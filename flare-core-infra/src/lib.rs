@@ -11,7 +11,10 @@ pub mod telemetry;
 pub use kv::{KvBackend, KvEntry, KvError, KvStore};
 
 // Re-exports - Auth
-pub use auth::{TokenClaims, TokenService};
+pub use auth::{
+    AuthError, AuthenticatedPrincipal, CompositeTokenValidator, TokenClaims, TokenService,
+    TokenValidationRequest, TokenValidator, TrustedIssuer,
+};
 
 // Re-exports - Telemetry
 pub use telemetry::{LoggingSubscriberOptions, init_fmt_subscriber};

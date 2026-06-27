@@ -18,6 +18,14 @@ pub trait Dispatcher: Send + Sync {
     /// 分发消息
     async fn dispatch(&self, message: Message) -> Result<MessageResult, ConsumerError>;
 
+    /// 批量分发消息。
+    ///
+    /// 实现可以在所有消息匹配同一处理器时调用批量 handler；混合 topic 或 handler 时应安全退化为逐条分发。
+    async fn dispatch_batch(
+        &self,
+        messages: Vec<Message>,
+    ) -> Result<Vec<MessageResult>, ConsumerError>;
+
     /// 注册处理器
     fn register(
         &mut self,
@@ -87,6 +95,57 @@ impl Dispatcher for TopicDispatcher {
         }
     }
 
+    async fn dispatch_batch(
+        &self,
+        messages: Vec<Message>,
+    ) -> Result<Vec<MessageResult>, ConsumerError> {
+        let Some(first) = messages.first() else {
+            return Ok(Vec::new());
+        };
+        let first_topic = first.context.topic.clone();
+        let Some(first_handler) = self.find_handler(&first_topic) else {
+            tracing::warn!(topic = %first_topic, "No handler found for topic");
+            return Err(ConsumerError::NoHandler(first_topic));
+        };
+        let first_handler_name = first_handler.name().to_string();
+
+        let single_handler = messages.iter().all(|message| {
+            self.find_handler(&message.context.topic)
+                .is_some_and(|handler| handler.name() == first_handler_name)
+        });
+
+        if single_handler && first_handler.supports_batch() {
+            tracing::trace!(
+                handler = %first_handler_name,
+                batch_size = messages.len(),
+                "Dispatching message batch"
+            );
+            return first_handler.handle_batch(messages).await;
+        }
+
+        let mut results = Vec::with_capacity(messages.len());
+        for message in messages {
+            let topic = message.context.topic.clone();
+            let Some(handler) = self.find_handler(&topic) else {
+                tracing::warn!(topic = %topic, "No handler found for topic");
+                return Err(ConsumerError::NoHandler(topic));
+            };
+            match handler.handle(message).await {
+                Ok(result) => results.push(result),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        topic = %topic,
+                        handler = %handler.name(),
+                        "Message handler failed in non-atomic batch fallback"
+                    );
+                    results.push(MessageResult::Nack);
+                }
+            }
+        }
+        Ok(results)
+    }
+
     fn register(
         &mut self,
         topic: String,
@@ -150,6 +209,58 @@ impl Dispatcher for RegistryDispatcher {
                 Err(ConsumerError::NoHandler(topic))
             }
         }
+    }
+
+    async fn dispatch_batch(
+        &self,
+        messages: Vec<Message>,
+    ) -> Result<Vec<MessageResult>, ConsumerError> {
+        let Some(first) = messages.first() else {
+            return Ok(Vec::new());
+        };
+        let first_topic = first.context.topic.clone();
+        let Some(first_handler) = self.registry.get(&first_topic) else {
+            tracing::warn!(topic = %first_topic, "No handler found for topic");
+            return Err(ConsumerError::NoHandler(first_topic));
+        };
+        let first_handler_name = first_handler.name().to_string();
+
+        let single_handler = messages.iter().all(|message| {
+            self.registry
+                .get(&message.context.topic)
+                .is_some_and(|handler| handler.name() == first_handler_name)
+        });
+
+        if single_handler && first_handler.supports_batch() {
+            tracing::trace!(
+                handler = %first_handler_name,
+                batch_size = messages.len(),
+                "Dispatching message batch"
+            );
+            return first_handler.handle_batch(messages).await;
+        }
+
+        let mut results = Vec::with_capacity(messages.len());
+        for message in messages {
+            let topic = message.context.topic.clone();
+            let Some(handler) = self.registry.get(&topic) else {
+                tracing::warn!(topic = %topic, "No handler found for topic");
+                return Err(ConsumerError::NoHandler(topic));
+            };
+            match handler.handle(message).await {
+                Ok(result) => results.push(result),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        topic = %topic,
+                        handler = %handler.name(),
+                        "Message handler failed in non-atomic batch fallback"
+                    );
+                    results.push(MessageResult::Nack);
+                }
+            }
+        }
+        Ok(results)
     }
 
     fn register(

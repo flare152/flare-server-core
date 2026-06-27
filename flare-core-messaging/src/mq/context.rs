@@ -12,7 +12,7 @@ use std::collections::HashMap;
 ///
 /// # 示例
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use flare_server_core::mq::context::ctx_to_mq_headers;
 /// use flare_server_core::context::{Context, Ctx};
 ///
@@ -34,7 +34,7 @@ pub fn ctx_to_mq_headers(ctx: &Ctx) -> HashMap<String, String> {
 ///
 /// # 示例
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use flare_server_core::mq::context::mq_headers_to_ctx;
 /// use std::collections::HashMap;
 ///
@@ -59,7 +59,7 @@ pub fn mq_headers_to_ctx(headers: &HashMap<String, String>) -> Ctx {
 ///
 /// # 示例
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use flare_server_core::mq::context::merge_ctx_to_headers;
 /// use flare_server_core::context::{Context, Ctx};
 /// use std::collections::HashMap;

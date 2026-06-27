@@ -31,6 +31,17 @@ pub struct DiscoveryConfig {
     pub refresh_interval: Option<u64>,
 }
 
+/// Consul / etcd 服务实例刷新间隔（秒）。
+///
+/// 环境变量 `CONSUL_DISCOVERY_REFRESH_INTERVAL`，默认 60（本地多进程 dev 降低 Consul 压力）。
+pub fn default_discovery_refresh_interval_secs() -> u64 {
+    std::env::var("CONSUL_DISCOVERY_REFRESH_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v >= 5)
+        .unwrap_or(60)
+}
+
 /// 后端类型
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

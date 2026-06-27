@@ -100,13 +100,18 @@ pub use flare_core_infra::kv;
 pub use flare_core_infra::telemetry;
 
 // 认证类型
-pub use flare_core_infra::auth::{TokenClaims, TokenService};
+pub use flare_core_infra::auth::{
+    AuthError, AuthenticatedPrincipal, CompositeTokenValidator, TokenClaims, TokenService,
+    TokenValidationRequest, TokenValidator, TrustedIssuer,
+};
 
 // KV 存储类型
 pub use flare_core_infra::kv::{KvBackend, KvStore};
 
 // 重新导出 telemetry 常用类型
-pub use flare_core_infra::telemetry::{LoggingSubscriberOptions, init_fmt_subscriber};
+pub use flare_core_infra::telemetry::{
+    LoggingSubscriberOptions, OtlpTracingOptions, init_fmt_subscriber, init_tracing_subscriber,
+};
 
 // 运行时
 pub use flare_core_runtime::ServiceRuntime;

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use async_nats::HeaderMap;
 use async_nats::jetstream;
+use futures_util::future::try_join_all;
 
 use super::config::{NatsProducerConfig, NatsStreamSpec, resolve_subject_stream};
 use crate::mq::producer::{Producer, ProducerError, ProducerMessage};
@@ -204,7 +205,14 @@ impl Producer for NatsProducer {
                 }
             }
 
-            tokio::time::sleep(self.retry_backoff.saturating_mul(attempt)).await;
+            // 指数退避 + 基于 message_id 的确定性抖动：broker 恢复时避免重试惊群。
+            // 指数增长（×1,2,4,…，封顶 ×64）拉开同一消息的重试间隔；message_id 派生的
+            // 抖动让并发 producer 错峰，且无需引入 RNG 依赖。
+            let exp = 1u32 << u32::min(attempt.saturating_sub(1), 6);
+            let base = self.retry_backoff.saturating_mul(exp);
+            let jitter_pct = u32::from(message_id.bytes().last().unwrap_or(0)) % 25;
+            let backoff = base.saturating_add(base / 100 * jitter_pct);
+            tokio::time::sleep(backoff).await;
         };
 
         tracing::trace!(
@@ -225,7 +233,7 @@ impl Producer for NatsProducer {
         ctx: &flare_core_base::context::Ctx,
         messages: Vec<ProducerMessage>,
     ) -> Result<(), ProducerError> {
-        for msg in messages {
+        let sends = messages.into_iter().map(|msg| async move {
             self.send(
                 ctx,
                 &msg.topic, // NATS 使用 subject
@@ -233,9 +241,9 @@ impl Producer for NatsProducer {
                 msg.payload,
                 Some(msg.headers),
             )
-            .await?;
-        }
-        Ok(())
+            .await
+        });
+        try_join_all(sends).await.map(|_| ())
     }
 
     fn name(&self) -> &str {
