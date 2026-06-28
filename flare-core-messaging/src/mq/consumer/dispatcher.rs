@@ -2,7 +2,7 @@
 //!
 //! 按 topic 路由消息到对应的处理器。
 //!
-//! JetStream **消费者组（`group.id`）** 由 [crate::mq::jetstream::JetStreamMessageFetcher] /
+//! JetStream **消费者组（`group.id`）** 由 `JetStreamMessageFetcher` /
 //! [crate::mq::consumer::ConsumerConfig::consumer_group_override] 与 `JetStreamConsumerConfig` 决定，
 //! 与 topic 路由正交（同一组可订阅多 topic，由本分发器按 topic 选 handler）。
 

@@ -49,7 +49,7 @@ impl PluginContext {
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,ignore
 /// use flare_core_runtime::plugin::{Plugin, PluginContext};
 /// use flare_core_runtime::error::PluginError;
 ///

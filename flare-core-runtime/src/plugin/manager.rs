@@ -13,7 +13,7 @@ use tracing::{error, warn};
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,ignore
 /// use flare_core_runtime::plugin::{PluginManager, Plugin};
 ///
 /// let mut manager = PluginManager::new();

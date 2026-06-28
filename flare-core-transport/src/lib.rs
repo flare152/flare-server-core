@@ -1,29 +1,31 @@
-//! Flare Core Transport - 传输层
+//! Transport infrastructure for Flare server applications.
 //!
-//! 提供 gRPC、HTTP、服务发现等传输层能力
+//! `flare-core-transport` contains optional HTTP, gRPC, and service-discovery
+//! integrations. It is intentionally feature-gated so services can depend only
+//! on the transport surfaces they actually use.
 //!
 //! # Features
 //!
-//! - `grpc`: gRPC 支持 (可选)
-//! - `http`: HTTP 支持 (可选)
-//! - `discovery`: 服务发现支持 (可选)
+//! - `grpc`: tonic gRPC context, client, and middleware helpers.
+//! - `http`: Axum response and middleware helpers.
+//! - `discovery`: service discovery backends and service clients.
 //!
-//! # 示例
+//! # Example
 //!
 //! ```toml
 //! [dependencies]
-//! flare-core-transport = { version = "0.2", features = ["grpc", "http"] }
+//! flare-core-transport = { version = "1.0.1", features = ["grpc", "http"] }
 //! ```
 
-// ===== gRPC (可选) =====
+// gRPC integration.
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
-// ===== HTTP (可选) =====
+// HTTP integration.
 #[cfg(feature = "http")]
 pub mod http;
 
-// ===== 服务发现 (可选) =====
+// Service discovery integration.
 #[cfg(feature = "discovery")]
 pub mod discovery;
 

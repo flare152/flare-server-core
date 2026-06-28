@@ -201,18 +201,67 @@ impl DiscoveryBackend for EtcdBackend {
         // watch 时使用默认 namespace
         let key_prefix = self.service_key(service_type, None, Some(&self.default_namespace));
         let client = self.client.clone();
+        let service_type = service_type.to_string();
 
         tokio::spawn(async move {
-            let mut client = client.lock().await;
-            let opts = WatchOptions::new().with_prefix();
-            let (_watcher, mut stream) = client.watch(key_prefix, Some(opts)).await.unwrap();
+            // 退避重连：etcd 抖动/断流时不再 panic，自动重建 watch。
+            const BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(500);
+            const BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+            let mut backoff = BACKOFF_MIN;
 
-            while let Ok(Some(resp)) = stream.message().await {
-                for event in resp.events() {
-                    if let Some(kv) = event.kv() {
-                        if let Ok(instance) = serde_json::from_slice::<ServiceInstance>(kv.value())
-                        {
-                            let _ = tx.send(instance).await;
+            loop {
+                // 消费端已关闭则退出，避免泄漏后台任务。
+                if tx.is_closed() {
+                    return;
+                }
+
+                // 仅在创建 watcher 期间持锁；随后释放，避免 watch 长期独占共享 client。
+                let watch_result = {
+                    let mut guard = client.lock().await;
+                    let opts = WatchOptions::new().with_prefix();
+                    guard.watch(key_prefix.clone(), Some(opts)).await
+                };
+
+                let (_watcher, mut stream) = match watch_result {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        tracing::warn!(
+                            %service_type,
+                            %error,
+                            retry_in = ?backoff,
+                            "etcd watch 建立失败，退避后重试",
+                        );
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(BACKOFF_MAX);
+                        continue;
+                    }
+                };
+
+                // 成功建立连接：重置退避。
+                backoff = BACKOFF_MIN;
+
+                loop {
+                    match stream.message().await {
+                        Ok(Some(resp)) => {
+                            for event in resp.events() {
+                                if let Some(kv) = event.kv() {
+                                    if let Ok(instance) =
+                                        serde_json::from_slice::<ServiceInstance>(kv.value())
+                                    {
+                                        if tx.send(instance).await.is_err() {
+                                            return; // 消费端关闭
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::warn!(%service_type, "etcd watch 流结束，重建中");
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%service_type, %error, "etcd watch 流错误，重建中");
+                            break;
                         }
                     }
                 }

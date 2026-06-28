@@ -1,55 +1,84 @@
-//! Flare Server Core - 统一入口
+//! Aggregated server-side infrastructure toolkit for Flare services.
 //!
-//! 重新导出所有子 crate 的公共 API
+//! `flare-server-core` re-exports the lower-level server infrastructure crates
+//! under one dependency for application services that want a compact import
+//! surface. It covers runtime lifecycle, context propagation, typed errors,
+//! HTTP/gRPC helpers, service discovery, event buses, message queues,
+//! authentication, KV abstractions, and telemetry setup.
+//!
+//! # Crate Layout
+//!
+//! - [`flare_core_base`] provides context, errors, configuration, IDs, and
+//!   shared service types.
+//! - [`flare_core_runtime`] provides service lifecycle, task orchestration,
+//!   health checks, shutdown signals, and state tracking.
+//! - [`flare_core_infra`] provides KV, authentication, metrics, and telemetry
+//!   helpers.
+//! - [`flare_core_transport`] provides HTTP, gRPC, service discovery, and
+//!   transport middleware.
+//! - [`flare_core_messaging`] provides event-bus, topic-bus, NATS, and Kafka
+//!   primitives.
+//!
+//! # Feature Flags
+//!
+//! Enable only the integration surfaces you need:
+//!
+//! - `http`: HTTP response and middleware helpers.
+//! - `grpc`: tonic context, client, interceptor, and middleware helpers.
+//! - `discovery`: service discovery and service clients.
+//! - `nats` / `kafka`: MQ integrations.
+//! - `kv`, `auth`, `telemetry`: infrastructure adapters.
+//! - `proto`: optional bridge to `flare-proto` structured payloads.
+//! - `full`: all public capabilities.
 
-// 重新导出所有子 crate
+// Re-export all lower-level crates.
 pub use flare_core_base;
 pub use flare_core_infra;
 pub use flare_core_messaging;
 pub use flare_core_runtime;
 pub use flare_core_transport;
 
-// 重新导出常用模块
+// Common module re-exports.
 pub use flare_core_base::config;
 pub use flare_core_base::context;
 pub use flare_core_base::error;
 pub use flare_core_base::types;
 
-// utils 模块 (包含 gRPC 工具函数)
+// Utility module. With `grpc`, this also includes gRPC context helpers.
 #[cfg(not(feature = "grpc"))]
 pub use flare_core_base::utils;
 
 #[cfg(feature = "grpc")]
 pub mod utils {
-    // 重新导出 base utils
+    // Base utilities.
     pub use flare_core_base::utils::*;
-    // 添加 gRPC 相关工具函数
+    // gRPC utilities.
     pub use flare_core_transport::grpc::utils::{
         extract_ctx_from_request_opt, require_ctx_from_request,
     };
 }
 
-// 重新导出错误类型和宏
+// Error types and macros.
 pub use flare_core_base::error::{ErrorCode, FlareError};
 
-// 重新导出错误宏
+// Error macros.
 pub use flare_core_base::{flare_err, flare_err_details};
 
-// 重新导出上下文类型
+// Context type.
 pub use flare_core_base::context::Context;
 
-// 重新导出配置类型
+// Configuration types.
 pub use flare_core_base::config::{
     Config, MeshConfig, RegistryConfig, ServerConfig, ServiceConfig, StorageConfig,
 };
 
-// gRPC utils (需要 grpc feature)
+// gRPC utilities.
 #[cfg(feature = "grpc")]
 pub use flare_core_transport::grpc::utils::{
     extract_ctx_from_request_opt, require_ctx_from_request,
 };
 
-// gRPC client (需要 grpc feature)
+// gRPC client helpers.
 #[cfg(feature = "grpc")]
 pub use flare_core_transport::grpc::client::{
     ClientContextConfig, ClientContextInterceptor, context_interceptor_with_tenant,
@@ -57,7 +86,7 @@ pub use flare_core_transport::grpc::client::{
     set_context_metadata,
 };
 
-// gRPC middleware (需要 grpc feature)
+// gRPC middleware helpers.
 #[cfg(feature = "grpc")]
 pub use flare_core_transport::grpc::middleware::{
     ContextLayer, ContextService, extract_actor_id, extract_context, extract_request_id,
@@ -65,7 +94,7 @@ pub use flare_core_transport::grpc::middleware::{
     require_tenant_id, require_user_id,
 };
 
-// 传输层 (需要对应 feature)
+// Transport modules.
 #[cfg(feature = "http")]
 pub use flare_core_transport::http;
 
@@ -75,57 +104,57 @@ pub use flare_core_transport::grpc;
 #[cfg(feature = "discovery")]
 pub use flare_core_transport::discovery;
 
-// 服务发现类型 (需要 discovery feature)
+// Service discovery types.
 #[cfg(feature = "discovery")]
 pub use flare_core_transport::discovery::{DiscoveryFactory, LoadBalanceStrategy, ServiceDiscover};
 
-// 消息层
+// Messaging layer.
 pub use flare_core_messaging::eventbus;
 pub use flare_core_messaging::mq;
 
-// NATS JetStream 支持 (需要 nats feature)
+// NATS JetStream support.
 #[cfg(feature = "nats")]
 pub use flare_core_messaging::mq::nats;
 
-// 重新导出 eventbus 的常用类型
+// Common event-bus types.
 pub use flare_core_messaging::eventbus::{
     DEFAULT_TOPIC_BROADCAST_CAPACITY, EVENT_ENVELOPE_CONTENT_TYPE, EventBus, EventEnvelope,
     EventSubscriber, HEADER_CONTENT_TYPE, InMemoryEventBus, InMemoryTopicEventBus, MqEventHandler,
     MqTopicEventBus, TopicBroadcast, TopicEventBus, register_event_handler, run_event_consumer,
 };
 
-// 基础设施
+// Infrastructure modules.
 pub use flare_core_infra::auth;
 pub use flare_core_infra::kv;
 pub use flare_core_infra::telemetry;
 
-// 认证类型
+// Authentication types.
 pub use flare_core_infra::auth::{
     AuthError, AuthenticatedPrincipal, CompositeTokenValidator, TokenClaims, TokenService,
     TokenValidationRequest, TokenValidator, TrustedIssuer,
 };
 
-// KV 存储类型
+// KV storage types.
 pub use flare_core_infra::kv::{KvBackend, KvStore};
 
-// 重新导出 telemetry 常用类型
+// Common telemetry types.
 pub use flare_core_infra::telemetry::{
     LoggingSubscriberOptions, OtlpTracingOptions, init_fmt_subscriber, init_tracing_subscriber,
 };
 
-// 运行时
+// Runtime types.
 pub use flare_core_runtime::ServiceRuntime;
 pub use flare_core_runtime::config as runtime_config;
 pub use flare_core_runtime::task;
 
-// 运行时模块
+// Runtime module.
 pub use flare_core_runtime as runtime;
 
-// 客户端 (需要 discovery feature)
+// Service discovery client.
 #[cfg(feature = "discovery")]
 pub use flare_core_transport::discovery::ServiceClient;
 
-// 中间件模块
+// Middleware module.
 #[cfg(all(feature = "http", not(feature = "grpc")))]
 pub use flare_core_transport::http::middleware;
 
@@ -140,9 +169,9 @@ pub mod middleware {
 
 #[cfg(all(feature = "http", feature = "grpc"))]
 pub mod middleware {
-    // HTTP middleware
+    // HTTP middleware.
     pub use flare_core_transport::http::middleware::*;
-    // gRPC middleware
+    // gRPC middleware.
     pub use flare_core_transport::grpc::middleware::{
         ContextLayer, ContextService, extract_actor_id, extract_context, extract_request_id,
         extract_tenant_id, extract_user_id, get_context, require_actor_id, require_request_id,
@@ -150,7 +179,7 @@ pub mod middleware {
     };
 }
 
-// gRPC client 模块 (需要 grpc feature)
+// gRPC client module.
 #[cfg(feature = "grpc")]
 pub mod client {
     pub use flare_core_transport::grpc::client::{
@@ -160,7 +189,7 @@ pub mod client {
     };
 }
 
-// 客户端模块 (需要 discovery feature)
+// Discovery client module.
 #[cfg(feature = "discovery")]
 pub mod discovery_client {
     pub use flare_core_transport::discovery::ServiceClient;

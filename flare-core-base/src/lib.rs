@@ -1,14 +1,20 @@
-//! Flare Core Base - 基础类型和工具
+//! Shared server primitives for Flare services.
 //!
-//! 提供上下文传播、错误处理、配置管理、国际化等核心能力
+//! `flare-core-base` is the dependency-light foundation used by the rest of
+//! the server-core crates. It provides context propagation, typed errors,
+//! layered configuration, service metadata, IDs, and small utility helpers.
 //!
-//! # 模块
+//! # Main Modules
 //!
-//! - `context`: 上下文传播系统,支持 TraceID、UserID、TenantID 等追踪信息
-//! - `error`: 统一错误处理,支持错误码、分类、国际化消息
-//! - `config`: 配置管理,支持服务、Mesh、存储等配置
-//! - `i18n`: 国际化支持,多语言错误消息
-//! - `types`: 公共类型定义
+//! - [`context`] carries tenant, actor, trace, request, device, and audit
+//!   metadata through async service boundaries.
+//! - [`error`] provides typed error codes, categories, builders, and localized
+//!   error payloads.
+//! - [`config`] provides layered server, mesh, registry, service, and storage
+//!   configuration models.
+//! - [`i18n`] provides built-in English and Chinese translation tables for
+//!   structured errors.
+//! - [`id`] provides Snowflake-style ID generation.
 
 pub mod config;
 pub mod context;
@@ -44,7 +50,7 @@ pub use types::{ServiceInfo, ServiceType};
 // Re-exports - ID
 pub use id::{SnowflakeError, SnowflakeGenerator};
 
-/// Prelude module - 常用类型导入
+/// Common imports for service code.
 pub mod prelude {
     pub use crate::config::Config;
     pub use crate::context::{Context, ContextExt, Ctx};

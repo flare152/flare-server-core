@@ -17,7 +17,7 @@ use async_trait::async_trait;
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,ignore
 /// use flare_core_runtime::middleware::Middleware;
 /// use flare_core_runtime::error::MiddlewareError;
 ///

@@ -5,8 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Flare Core Infrastructure - 基础设施层 (KV + Auth + Telemetry)"
+description = "Infrastructure adapters for Flare server applications: KV, auth, metrics, and telemetry."
 repository.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # 默认功能

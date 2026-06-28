@@ -411,7 +411,7 @@ impl Stream for ServiceDiscover {
 ///
 /// 注意：Balance 的第二个类型参数是请求类型，我们使用 () 作为占位符
 ///
-/// 注意：ServiceClient 不支持 Clone，并发调用时请使用 Arc<Mutex<ServiceClient>>
+/// 注意：ServiceClient 不支持 Clone，并发调用时请使用 `Arc<Mutex<ServiceClient>>`
 pub struct ServiceClient {
     balancer: tower::balance::p2c::Balance<
         Pin<Box<ServiceDiscover>>,

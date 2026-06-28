@@ -74,17 +74,21 @@ impl TaskStateInfo {
 /// use flare_core_runtime::state::StateTracker;
 /// use flare_core_runtime::task::TaskState;
 ///
+/// #[tokio::main]
+/// async fn main() {
 /// let tracker = StateTracker::new();
 ///
 /// // 注册任务
-/// tracker.register_task("task-1", TaskState::Pending);
+/// tracker.register_task("task-1", TaskState::Pending).await;
 ///
 /// // 更新状态
-/// tracker.update_state("task-1", TaskState::Running);
+/// tracker.update_state("task-1", TaskState::Starting).await;
+/// tracker.update_state("task-1", TaskState::Running).await;
 ///
 /// // 获取状态
-/// let info = tracker.get_state("task-1").unwrap();
+/// let info = tracker.get_state("task-1").await.unwrap();
 /// assert_eq!(info.state, TaskState::Running);
+/// }
 /// ```
 pub struct StateTracker {
     /// 任务状态映射
@@ -314,6 +318,8 @@ mod tests {
 
         assert!(!tracker.all_ready().await);
 
+        tracker.update_state("task-1", TaskState::Starting).await;
+        tracker.update_state("task-2", TaskState::Starting).await;
         tracker.update_state("task-1", TaskState::Running).await;
         tracker.update_state("task-2", TaskState::Running).await;
 

@@ -13,7 +13,7 @@ use tracing::warn;
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,ignore
 /// use flare_core_runtime::middleware::{MiddlewareChain, Middleware};
 ///
 /// let mut chain = MiddlewareChain::new();

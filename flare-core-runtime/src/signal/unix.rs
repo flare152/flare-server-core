@@ -21,7 +21,7 @@ pub enum UnixSignalKind {
 /// # 示例
 ///
 /// ```rust
-/// use flare_core_runtime::signal::unix::{UnixSignal, UnixSignalKind};
+/// use flare_core_runtime::{UnixSignal, UnixSignalKind};
 ///
 /// let signal = UnixSignal::new(UnixSignalKind::Terminate);
 /// ```

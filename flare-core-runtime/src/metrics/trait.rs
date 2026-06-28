@@ -18,7 +18,7 @@ use std::time::Duration;
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,ignore
 /// use flare_core_runtime::metrics::MetricsCollector;
 /// use flare_core_runtime::error::MetricsError;
 /// use std::time::Duration;

@@ -11,7 +11,7 @@ use flare_core_base::error::Result;
 
 use super::envelope::EventEnvelope;
 
-/// 基于 Topic 的事件总线（内存或 MQ）；错误统一为 [crate::error::FlareError]
+/// 基于 Topic 的事件总线（内存或 MQ）；错误统一为 `flare_core_base::error::FlareError`
 pub trait TopicEventBus: Send + Sync {
     /// 发布；分布式实现将 `ctx` 写入 MQ 头；内存实现扇出 [super::in_memory_topic_event_bus::TopicBroadcast]
     fn publish<'a>(

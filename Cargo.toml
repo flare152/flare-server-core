@@ -9,13 +9,13 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.94.0"
 authors = ["Flare Team"]
 license = "Apache-2.0"
-repository = "https://github.com/flare-im/flare-im"
-homepage = "https://github.com/flare-im/flare-im"
+repository = "https://github.com/flare152/flare-server-core"
+homepage = "https://github.com/flare152/flare-server-core"
 
 [workspace.dependencies]
 # ===== 异步运行时 =====
@@ -84,14 +84,14 @@ rdkafka = { version = "0.36", features = ["cmake-build"] }
 prometheus = "0.14"
 
 # ===== 内部 crate =====
-flare-core-base = { path = "flare-core-base" }
-flare-core-transport = { path = "flare-core-transport" }
-flare-core-infra = { path = "flare-core-infra" }
-flare-core-messaging = { path = "flare-core-messaging" }
-flare-core-runtime = { path = "flare-core-runtime" }
+flare-core-base = { version = "1.0.1", path = "flare-core-base" }
+flare-core-transport = { version = "1.0.1", path = "flare-core-transport" }
+flare-core-infra = { version = "1.0.1", path = "flare-core-infra" }
+flare-core-messaging = { version = "1.0.1", path = "flare-core-messaging" }
+flare-core-runtime = { version = "1.0.1", path = "flare-core-runtime" }
 
 # ===== Proto =====
-flare-proto = { path = "../flare-proto" }
+flare-proto = { version = "1.0.1", path = "../flare-proto" }
 
 [package]
 name = "flare-server-core"
@@ -100,11 +100,14 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Flare IM Server Core Library - Complete infrastructure for IM server including gRPC, HTTP, MQ, and more."
+description = "Server-side infrastructure toolkit for Flare IM services: runtime, transport, messaging, auth, telemetry, and context propagation."
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/flare-server-core"
 readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [lib]
 name = "flare_server_core"

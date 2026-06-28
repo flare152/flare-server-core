@@ -5,8 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Flare Core Transport - 传输层 (gRPC + HTTP + Discovery)"
+description = "HTTP, gRPC, service discovery, and transport middleware primitives for Flare server applications."
 repository.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # 默认功能: 空的,按需启用

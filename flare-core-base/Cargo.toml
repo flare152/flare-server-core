@@ -5,8 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Flare Core Base - 基础类型和工具"
+description = "Shared server primitives for Flare services: context, errors, configuration, IDs, and common types."
 repository.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = []

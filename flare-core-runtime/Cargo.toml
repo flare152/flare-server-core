@@ -5,8 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Flare Core Runtime - 运行时层"
+description = "Service runtime, task orchestration, health, shutdown, plugin, and state tracking primitives."
 repository.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = []

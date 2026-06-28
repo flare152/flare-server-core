@@ -7,7 +7,7 @@
 /// # 示例
 ///
 /// ```rust
-/// use flare_core_base::error::{flare_err, ErrorCode};
+/// use flare_core_base::{error::ErrorCode, flare_err};
 ///
 /// let err = flare_err!(ErrorCode::BadRequest, "Invalid input");
 /// ```
@@ -21,7 +21,7 @@ macro_rules! flare_err {
 /// # 示例
 ///
 /// ```rust
-/// use flare_core_base::error::{flare_err_details, ErrorCode};
+/// use flare_core_base::{error::ErrorCode, flare_err_details};
 ///
 /// let err = flare_err_details!(ErrorCode::BadRequest, "reason", "details");
 /// ```
@@ -39,7 +39,7 @@ macro_rules! flare_err_details {
 /// # 示例
 ///
 /// ```rust
-/// use flare_core_base::error::{flare_err_params, ErrorCode};
+/// use flare_core_base::{error::ErrorCode, flare_err_params};
 ///
 /// let err = flare_err_params!(ErrorCode::BadRequest, "reason", "details", "key1" => "value1", "key2" => "value2");
 /// ```

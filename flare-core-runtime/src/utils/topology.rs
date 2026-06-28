@@ -24,9 +24,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// use flare_core_runtime::utils::topological_sort;
 ///
 /// let items = vec![
-///     ("task-a", vec![]),
-///     ("task-b", vec!["task-a".to_string()]),
-///     ("task-c", vec!["task-a".to_string()]),
+///     ("task-a".to_string(), vec![]),
+///     ("task-b".to_string(), vec!["task-a".to_string()]),
+///     ("task-c".to_string(), vec!["task-a".to_string()]),
 /// ];
 ///
 /// let sorted = topological_sort(items).unwrap();

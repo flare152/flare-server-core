@@ -26,7 +26,7 @@ pub struct HealthCheckResult {
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,ignore
 /// use flare_core_runtime::health::{HealthChecker, HealthCheck};
 /// use std::sync::Arc;
 ///

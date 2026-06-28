@@ -41,16 +41,13 @@ pub async fn auth_middleware(
     let headers = request.headers();
 
     // 1. 提取 Authorization Header
-    let auth_header = headers.get("Authorization").and_then(|h| h.to_str().ok());
-
-    if auth_header.is_none() {
+    let Some(auth_header) = headers.get("Authorization").and_then(|h| h.to_str().ok()) else {
         warn!("Missing Authorization header");
         let response: ApiResponse<()> = ApiResponse::from_code(ErrorCode::HttpUnauthorized);
         return (StatusCode::UNAUTHORIZED, Json(response)).into_response();
-    }
+    };
 
     // 2. 验证 Bearer Token 格式
-    let auth_header = auth_header.unwrap();
     if !auth_header.starts_with("Bearer ") {
         warn!("Invalid Authorization header format");
         let response: ApiResponse<()> = ApiResponse::from_code(ErrorCode::HttpUnauthorized);

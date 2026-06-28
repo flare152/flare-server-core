@@ -1,20 +1,22 @@
-//! Flare Core Infrastructure - 基础设施层
+//! Infrastructure adapters for Flare server applications.
 //!
-//! 提供 KV 存储、认证、可观测性等基础设施能力
+//! `flare-core-infra` collects reusable infrastructure helpers that are shared
+//! across services: token validation, authenticated principals, KV storage
+//! traits, metrics, and tracing subscriber setup.
 
 pub mod auth;
 pub mod kv;
 pub mod metrics;
 pub mod telemetry;
 
-// Re-exports - KV
+// KV re-exports.
 pub use kv::{KvBackend, KvEntry, KvError, KvStore};
 
-// Re-exports - Auth
+// Auth re-exports.
 pub use auth::{
     AuthError, AuthenticatedPrincipal, CompositeTokenValidator, TokenClaims, TokenService,
     TokenValidationRequest, TokenValidator, TrustedIssuer,
 };
 
-// Re-exports - Telemetry
+// Telemetry re-exports.
 pub use telemetry::{LoggingSubscriberOptions, init_fmt_subscriber};

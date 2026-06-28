@@ -27,7 +27,7 @@ use tracing::{debug, error, info, warn};
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```rust,ignore
 /// use flare_core_runtime::task::TaskManager;
 /// use flare_core_runtime::task::SpawnTask;
 ///

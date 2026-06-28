@@ -1,10 +1,10 @@
 //! MQ 消费者运行时
 //!
 //! 负责消费循环、并发控制、优雅关闭等运行时功能。
-//! 轮询/退避/并发与 [crate::runtime::config::PollWorkerConfig]、[crate::runtime::config::RuntimeConfig] 对齐。
+//! 轮询/退避/并发与 `flare_core_runtime::config::PollWorkerConfig`、`flare_core_runtime::config::RuntimeConfig` 对齐。
 //!
-//! 与 [super::task::MqConsumer] / [crate::runtime::ServiceRuntime] 集成：使用 [ConsumerRuntimeTask]，
-//! 通过 [crate::runtime::ServiceRuntime::add_mq_consumer] 或 [crate::runtime::ServiceRuntime::add_mq_consumer_runtime] 注册。
+//! 与 [super::task::MqConsumer] / `flare_core_runtime::ServiceRuntime` 集成：使用 [ConsumerRuntimeTask]，
+//! 通过 `ServiceRuntime::add_mq_consumer` 或 `ServiceRuntime::add_mq_consumer_runtime` 注册。
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -156,7 +156,7 @@ impl ConsumerConfig {
         self
     }
 
-    /// JetStream：设置 `group.id` 覆盖（与 [crate::mq::jetstream::JetStreamMessageFetcher::new_with_consumer_group] 一致）
+    /// JetStream：设置 `group.id` 覆盖（与 `JetStreamMessageFetcher::new_with_consumer_group` 一致）
     pub fn with_consumer_group(mut self, group_id: impl Into<String>) -> Self {
         self.consumer_group_override = Some(group_id.into());
         self
@@ -276,7 +276,7 @@ impl ConsumerRuntime {
         }
     }
 
-    /// 在 [ServiceRuntime] 关闭信号下运行（与 [MqConsumer::consume] 的 `shutdown_rx` 对齐）
+    /// 在 `ServiceRuntime` 关闭信号下运行（与 [MqConsumer::consume] 的 `shutdown_rx` 对齐）
     pub async fn run_with_shutdown<MF>(
         &self,
         message_fetcher: &mut MF,
@@ -968,7 +968,7 @@ impl ConsumerRuntime {
     }
 }
 
-/// 将 [ConsumerRuntime] + [MessageFetcher] 适配为 [MqConsumer]，供 [crate::runtime::ServiceRuntime] 统一调度
+/// 将 [ConsumerRuntime] + [MessageFetcher] 适配为 [MqConsumer]，供 `ServiceRuntime` 统一调度
 pub struct ConsumerRuntimeTask {
     runtime: Arc<ConsumerRuntime>,
     fetcher: Arc<tokio::sync::Mutex<Box<dyn MessageFetcher + Send>>>,

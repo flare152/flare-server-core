@@ -1,14 +1,17 @@
-//! Flare Core Messaging - 消息层
+//! Event-bus and MQ primitives for Flare server applications.
 //!
-//! 提供消息队列和事件总线能力
+//! `flare-core-messaging` provides in-process event buses, topic-envelope
+//! handling, MQ producer/consumer traits, and optional NATS or Kafka adapters.
+//! Application services can use the same event contract in memory and across MQ
+//! backends.
 
 pub mod eventbus;
 pub mod mq;
 
-// Re-exports - MQ
+// MQ re-exports.
 pub use mq::{MessageHandler, MqConsumer, MqConsumerTask, Producer};
 
-// Re-exports - Event Bus
+// Event-bus re-exports.
 pub use eventbus::{
     EventBus, EventEnvelope, EventSubscriber, InMemoryEventBus, InMemoryTopicEventBus,
     MqTopicEventBus, TopicEventBus,

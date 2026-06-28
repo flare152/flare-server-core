@@ -30,7 +30,7 @@ impl TypeMap {
     /// # 示例
     ///
     /// ```rust
-    /// use flare_server_core::context::typemap::TypeMap;
+    /// use flare_core_base::context::typemap::TypeMap;
     ///
     /// let mut map = TypeMap::new();
     /// map.insert(42i32);
@@ -58,7 +58,7 @@ impl TypeMap {
     /// # 示例
     ///
     /// ```rust
-    /// use flare_server_core::context::typemap::TypeMap;
+    /// use flare_core_base::context::typemap::TypeMap;
     ///
     /// let mut map = TypeMap::new();
     /// map.insert(42i32);
@@ -81,7 +81,7 @@ impl TypeMap {
     /// # 示例
     ///
     /// ```rust
-    /// use flare_server_core::context::typemap::TypeMap;
+    /// use flare_core_base::context::typemap::TypeMap;
     ///
     /// let mut map = TypeMap::new();
     /// map.insert(42i32);

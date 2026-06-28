@@ -1,6 +1,6 @@
-//! 事件总线（Event Bus）
+//! Event bus primitives.
 //!
-//! 说明见 **[README.md](README.md)**（进程内领域事件、内存/MQ 两种 `TopicEventBus`、`Ctx` 与 [crate::error::FlareError]）。
+//! Provides in-process domain events plus memory and MQ-backed topic event buses.
 
 pub mod constants;
 mod domain_event_bus;

@@ -1,30 +1,34 @@
-//! Flare Core Runtime - 统一运行时框架
+//! Service runtime and lifecycle orchestration for Flare services.
 //!
-//! 提供强大、稳定、通用的运行时系统，能够管理各类服务组件的生命周期
+//! `flare-core-runtime` manages service tasks, dependency ordering, health
+//! checks, shutdown signals, plugin hooks, metrics collection, middleware, and
+//! state tracking. It is transport-neutral and is used by HTTP, gRPC, MQ, and
+//! custom workers.
 //!
 //! # 核心特性
 //!
-//! - **统一服务启动**: HTTP (axum/volo-http/actix-web), gRPC (tonic/volo), MQ 消费者, 自定义任务
-//! - **优雅停止**: 多信号源支持、依赖顺序关闭、超时强制终止
-//! - **服务编排**: 任务依赖管理、健康检查、服务注册/注销
-//! - **定时任务**: Cron 表达式调度、一次性延迟任务
-//! - **状态监控**: 任务状态追踪、指标暴露、事件通知
-//! - **可扩展性**: 插件化架构、中间件链、自定义适配器
+//! - Unified service startup for HTTP, gRPC, MQ consumers, and custom tasks.
+//! - Graceful shutdown with multiple signal sources and dependency ordering.
+//! - Service orchestration with task dependencies, health checks, and state
+//!   tracking.
+//! - Extensible plugin hooks, middleware chains, and custom adapters.
 //!
-//! # 架构设计
+//! # Architecture
 //!
-//! `flare-core-runtime` 只提供规范（trait 定义、配置、核心抽象），具体实现由其他 crate 提供：
-//! - `flare-core-transport` 实现 HTTP/gRPC 适配器
-//! - `flare-core-messaging` 实现 MQ 消费者适配器
+//! `flare-core-runtime` provides transport-neutral traits, configuration, and
+//! orchestration primitives. Concrete adapters live in sibling crates:
 //!
-//! # 示例
+//! - `flare-core-transport` implements HTTP and gRPC adapters.
+//! - `flare-core-messaging` implements MQ consumer adapters.
+//!
+//! # Example
 //!
 //! ```rust,no_run
 //! use flare_core_runtime::{ServiceRuntime, Task, TaskResult};
 //! use std::pin::Pin;
 //! use std::future::Future;
 //!
-//! // 定义自定义任务
+//! // Define a custom task.
 //! struct MyTask {
 //!     name: String,
 //! }
@@ -39,7 +43,7 @@
 //!         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 //!     ) -> Pin<Box<dyn Future<Output = TaskResult> + Send>> {
 //!         Box::pin(async move {
-//!             // 任务逻辑
+//!             // Task logic.
 //!             Ok(())
 //!         })
 //!     }
@@ -47,17 +51,17 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // 创建运行时
+//!     // Create the runtime.
 //!     let runtime = ServiceRuntime::new("my-service")
 //!         .add_task(Box::new(MyTask { name: "task-1".to_string() }));
 //!
-//!     // 运行
+//!     // Run until shutdown.
 //!     runtime.run().await?;
 //!     Ok(())
 //! }
 //! ```
 
-// 模块声明
+// Module declarations.
 pub mod config;
 pub mod error;
 pub mod health;
