@@ -1,9 +1,9 @@
-use tower::Layer;
+use tower::{
+    Layer,
+    limit::{ConcurrencyLimit, ConcurrencyLimitLayer},
+};
 
 /// 限流中间件层
-///
-/// 注意：这是一个简化的实现
-/// 实际使用时应该使用 tower 的 ConcurrencyLimitLayer 或类似的中间件
 #[derive(Clone)]
 pub struct RateLimitLayer {
     max_concurrent: usize,
@@ -11,24 +11,112 @@ pub struct RateLimitLayer {
 
 impl RateLimitLayer {
     pub fn new(max_concurrent: usize) -> Self {
-        Self { max_concurrent }
+        Self {
+            max_concurrent: max_concurrent.max(1),
+        }
+    }
+
+    pub fn max_concurrent(&self) -> usize {
+        self.max_concurrent
     }
 }
 
-// 简化实现：直接返回服务
-// 实际使用时应该使用 tower 的 ConcurrencyLimitLayer
-// 注意：这里使用 `for<'r>` 来约束 Request 类型参数
 impl<S> Layer<S> for RateLimitLayer
 where
-    S: Clone + Send + 'static,
+    S: Send + 'static,
 {
-    type Service = S;
+    type Service = ConcurrencyLimit<S>;
 
     fn layer(&self, service: S) -> Self::Service {
-        // TODO: 实现真正的并发限制
-        // 可以使用 tokio::sync::Semaphore 或其他机制
-        // 当前仅作为占位符，保留 max_concurrent 参数用于未来实现
-        let _max_concurrent = self.max_concurrent;
-        service
+        ConcurrencyLimitLayer::new(self.max_concurrent).layer(service)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        convert::Infallible,
+        future::{Future, poll_fn},
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll},
+        time::Duration,
+    };
+
+    use tokio::{sync::Notify, time::timeout};
+    use tower::{Layer, Service};
+
+    use super::RateLimitLayer;
+
+    #[derive(Clone)]
+    struct BlockingService {
+        started: Arc<AtomicUsize>,
+        release: Arc<Notify>,
+    }
+
+    impl Service<()> for BlockingService {
+        type Response = ();
+        type Error = Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            let started = self.started.clone();
+            let release = self.release.clone();
+
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                release.notified().await;
+                Ok(())
+            })
+        }
+    }
+
+    #[test]
+    fn zero_limit_is_normalized_to_one() {
+        let layer = RateLimitLayer::new(0);
+
+        assert_eq!(layer.max_concurrent(), 1);
+    }
+
+    #[tokio::test]
+    async fn enforces_concurrent_request_limit() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let mut service = RateLimitLayer::new(1).layer(BlockingService {
+            started: started.clone(),
+            release: release.clone(),
+        });
+
+        poll_fn(|cx| service.poll_ready(cx)).await.unwrap();
+        let first = tokio::spawn(service.call(()));
+
+        while started.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let second_ready = timeout(
+            Duration::from_millis(25),
+            poll_fn(|cx| service.poll_ready(cx)),
+        )
+        .await;
+        assert!(second_ready.is_err());
+
+        release.notify_waiters();
+        first.await.unwrap().unwrap();
+
+        timeout(
+            Duration::from_millis(100),
+            poll_fn(|cx| service.poll_ready(cx)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     }
 }

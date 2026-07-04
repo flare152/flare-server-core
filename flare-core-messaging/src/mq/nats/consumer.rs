@@ -13,7 +13,9 @@ use async_nats::jetstream::consumer::pull::Stream as PullStream;
 use futures_util::StreamExt;
 
 use super::super::process_ack_metrics::record_process_ack;
-use super::config::{NatsConsumerConfig, NatsStreamSpec, resolve_subject_stream};
+use super::config::{
+    NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, resolve_subject_stream,
+};
 use crate::mq::consumer::dispatcher::Dispatcher;
 use crate::mq::consumer::failure::{ConsumerFailurePublishers, retry_count_from_headers};
 use crate::mq::consumer::{
@@ -143,9 +145,9 @@ impl NatsMessageFetcher {
                 jetstream::consumer::AckPolicy::None
             },
             filter_subjects: subjects.clone(),
-            ack_wait: std::time::Duration::from_secs(30),
-            max_deliver: 16,
-            max_ack_pending: (config.batch_size().saturating_mul(16)).max(1024) as i64,
+            ack_wait: std::time::Duration::from_secs(config.ack_wait_secs().max(1)),
+            max_deliver: config.max_deliver().max(1),
+            max_ack_pending: config.max_ack_pending().max(1),
             max_batch: config.batch_size().max(1) as i64,
             max_expires: std::time::Duration::from_millis(config.batch_timeout_ms().max(1)),
             ..Default::default()
@@ -202,6 +204,69 @@ where
         dispatcher,
         task_name_prefix,
         ConsumerFailurePublishers::default(),
+    )
+    .await
+}
+
+/// 死信生产者配置包装:连接参数沿用服务配置,但 `stream_specs` 只含死信流,确保 `FLARE_DLQ` stream 存在
+/// (不依赖服务自身拓扑是否包含死信流)。
+struct DlqProducerConfig<'a, C: NatsProducerConfig> {
+    inner: &'a C,
+}
+
+impl<C: NatsProducerConfig> NatsProducerConfig for DlqProducerConfig<'_, C> {
+    fn nats_url(&self) -> &str {
+        self.inner.nats_url()
+    }
+    fn timeout_ms(&self) -> u64 {
+        self.inner.timeout_ms()
+    }
+    fn retries(&self) -> u32 {
+        self.inner.retries()
+    }
+    fn retry_backoff_ms(&self) -> u64 {
+        self.inner.retry_backoff_ms()
+    }
+    fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+        vec![super::config::dlq_stream_spec()]
+    }
+}
+
+/// 与 [`build_nats_consumer_tasks`] 相同,但额外接通**死信(DLQ)发布器**:重试耗尽/不可重试的消息不再
+/// 在 stream 里无限重投(毒消息循环),而是投到独立死信流的 `dlq_subject`(`flare.im.dlq.<service>`,见
+/// [`super::config::default_stream_specs`]),长留存以便排查/重放。`dlq_subject` 必须**落在死信流通配
+/// `flare.im.dlq.>` 之内、且不与本消费者订阅的 subject 重叠**,否则死信会被重新消费形成循环。
+pub async fn build_nats_consumer_tasks_with_dlq<C>(
+    config: &C,
+    consumer_config: ConsumerConfig,
+    dispatcher: Arc<dyn Dispatcher>,
+    task_name_prefix: impl AsRef<str>,
+    dlq_subject: impl Into<String>,
+) -> Result<Vec<MqConsumerTask>, ConsumerError>
+where
+    C: NatsConsumerConfig + NatsProducerConfig + Send + Sync,
+{
+    // 死信生产者**只确保死信流**(FLARE_DLQ),与服务自身配置的拓扑无关——否则若部署用自定义拓扑(非
+    // default_stream_specs),死信流可能缺失导致死信投递无 stream 而失败。
+    let dlq_producer_config = DlqProducerConfig { inner: config };
+    let producer = super::producer::NatsProducer::new(&dlq_producer_config)
+        .await
+        .map_err(|e| ConsumerError::Configuration(format!("build DLQ producer: {e}")))?;
+    let dead_letter: Arc<dyn crate::mq::consumer::DeadLetterPublisher> =
+        Arc::new(crate::mq::consumer::ProducerDeadLetterPublisher::new(
+            Arc::new(producer),
+            crate::mq::consumer::FailureTopic::fixed(dlq_subject),
+        ));
+    let failure_publishers = ConsumerFailurePublishers {
+        retry: None,
+        dead_letter: Some(dead_letter),
+    };
+    build_nats_consumer_tasks_with_failure_publishers(
+        config,
+        consumer_config,
+        dispatcher,
+        task_name_prefix,
+        failure_publishers,
     )
     .await
 }
@@ -394,7 +459,7 @@ impl NatsMessageFetcher {
             .get("content-type")
             .and_then(|v| ContentType::from_str(v))
             .unwrap_or(ContentType::Json);
-        let retry_count = retry_count_from_headers(&headers);
+        let retry_count = retry_count_from_headers(&headers).max(nats_delivery_retry_count(msg));
 
         let message_context = MessageContext {
             ctx,
@@ -501,6 +566,21 @@ impl NatsMessageFetcher {
 
         Arc::new(ctx)
     }
+}
+
+fn nats_delivery_retry_count(msg: &NatsMessage) -> u32 {
+    msg.info()
+        .ok()
+        .map(|info| delivery_attempt_retry_count(info.delivered))
+        .unwrap_or_default()
+}
+
+fn delivery_attempt_retry_count(delivered: i64) -> u32 {
+    let redeliveries = delivered.saturating_sub(1);
+    if redeliveries <= 0 {
+        return 0;
+    }
+    redeliveries.min(u32::MAX as i64) as u32
 }
 
 struct NatsMessageAck {
@@ -660,5 +740,22 @@ impl NatsConsumerBuilder {
 impl Default for NatsConsumerBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delivery_attempt_retry_count;
+
+    #[test]
+    fn delivery_attempt_retry_count_treats_first_delivery_as_zero_retries() {
+        assert_eq!(delivery_attempt_retry_count(0), 0);
+        assert_eq!(delivery_attempt_retry_count(1), 0);
+    }
+
+    #[test]
+    fn delivery_attempt_retry_count_maps_redelivery_attempts() {
+        assert_eq!(delivery_attempt_retry_count(2), 1);
+        assert_eq!(delivery_attempt_retry_count(16), 15);
     }
 }

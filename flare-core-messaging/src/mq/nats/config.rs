@@ -44,6 +44,18 @@ impl NatsStreamSpec {
 
 pub const STREAM_FLARE_MESSAGE: &str = "FLARE_MESSAGE";
 pub const STREAM_FLARE_PUSH: &str = "FLARE_PUSH";
+pub const STREAM_FLARE_DLQ: &str = "FLARE_DLQ";
+
+/// 死信(DLQ)统一 subject 前缀。死信流用通配 `flare.im.dlq.>` 单独成 stream,**不与任何消费者订阅的
+/// subject 重叠**(否则死信会被原消费者再次消费→无限重投/再死信循环)。各服务死信投到 `flare.im.dlq.<service>`。
+pub const SUBJECT_FLARE_DLQ_PREFIX: &str = "flare.im.dlq";
+
+/// 死信流规格:捕获所有处理失败/毒消息,长留存(7天)以便排查与重放。通配 `flare.im.dlq.>` 覆盖各服务
+/// DLQ 子 subject,且与任何消费者订阅的 subject 都不重叠(避免死信被重新消费形成循环)。
+pub fn dlq_stream_spec() -> NatsStreamSpec {
+    NatsStreamSpec::new(STREAM_FLARE_DLQ, vec!["flare.im.dlq.>".to_string()])
+        .with_max_age(Duration::from_secs(7 * 24 * 3600))
+}
 
 /// IM 默认 JetStream 拓扑。业务只使用 subject，stream 归属由 core 统一解析。
 pub fn default_stream_specs() -> Vec<NatsStreamSpec> {
@@ -57,6 +69,7 @@ pub fn default_stream_specs() -> Vec<NatsStreamSpec> {
         ),
         NatsStreamSpec::new(STREAM_FLARE_PUSH, vec!["flare.im.push.*".to_string()])
             .with_max_age(Duration::from_secs(24 * 3600)),
+        dlq_stream_spec(),
     ]
 }
 
@@ -135,6 +148,21 @@ pub trait NatsConsumerConfig: Send + Sync {
 
     /// 批处理超时（毫秒）
     fn batch_timeout_ms(&self) -> u64;
+
+    /// JetStream explicit ack 等待时间（秒）。
+    fn ack_wait_secs(&self) -> u64 {
+        30
+    }
+
+    /// JetStream 最大投递次数。
+    fn max_deliver(&self) -> i64 {
+        16
+    }
+
+    /// JetStream 最大未 ACK 消息数。
+    fn max_ack_pending(&self) -> i64 {
+        (self.batch_size().saturating_mul(16)).max(1024) as i64
+    }
 
     /// 是否启用持久化
     fn enable_durable(&self) -> bool;

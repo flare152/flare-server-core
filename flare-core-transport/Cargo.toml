@@ -46,7 +46,7 @@ futures = { workspace = true }
 # ===== gRPC (可选) =====
 tonic = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
-tower = { workspace = true }
+tower = { workspace = true, features = ["limit"] }
 
 # ===== HTTP (可选) =====
 axum = { workspace = true, optional = true }

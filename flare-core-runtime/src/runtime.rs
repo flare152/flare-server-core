@@ -231,6 +231,7 @@ impl ServiceRuntime {
 
     /// 设置运行时配置
     pub fn with_config(mut self, config: RuntimeConfig) -> Self {
+        self.task_manager.set_config(config.clone());
         self.config = config;
         self
     }
@@ -661,6 +662,7 @@ impl ServiceRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_service_runtime_new() {
@@ -697,6 +699,20 @@ mod tests {
         let runtime = ServiceRuntime::new("test-service").with_address(addr);
 
         assert_eq!(runtime.service_address, Some(addr));
+    }
+
+    #[test]
+    fn test_service_runtime_with_config_updates_task_manager() {
+        let config = RuntimeConfig::new().with_shutdown_timeout(Duration::from_millis(25));
+        let runtime = ServiceRuntime::new("test-service")
+            .add_spawn("task-1", async { Ok(()) })
+            .with_config(config);
+
+        assert_eq!(runtime.task_manager.task_count(), 1);
+        assert_eq!(
+            runtime.task_manager.shutdown_timeout(),
+            Duration::from_millis(25)
+        );
     }
 
     #[test]

@@ -73,6 +73,14 @@ impl TaskManager {
         }
     }
 
+    pub(crate) fn set_config(&mut self, config: RuntimeConfig) {
+        self.config = config;
+    }
+
+    pub(crate) fn shutdown_timeout(&self) -> Duration {
+        self.config.shutdown_timeout
+    }
+
     /// 添加任务
     pub fn add_task(&mut self, task: Box<dyn Task>) {
         debug!(task_name = %task.name(), "Adding task to manager");

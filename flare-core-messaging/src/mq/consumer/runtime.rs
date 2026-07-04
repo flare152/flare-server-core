@@ -11,6 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::oneshot;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
@@ -36,6 +37,7 @@ type BatchAckHandle = (
     Option<Arc<dyn super::types::MessageAck>>,
     Option<Message>,
 );
+const ORDERED_BATCH_KEY_CONCURRENCY: usize = 64;
 
 /// Generic consumer idempotency port.
 ///
@@ -215,7 +217,7 @@ impl ConsumerRuntime {
     where
         MF: MessageFetcher + Send + ?Sized,
     {
-        let semaphore = Arc::new(Semaphore::new(self.config.poll.concurrency));
+        let semaphore = Arc::new(Semaphore::new(self.config.poll.concurrency.max(1)));
         let mut tasks: JoinSet<Result<(), ConsumerError>> = JoinSet::new();
         let idle_backoff = self.config.poll.idle_backoff;
         let error_backoff = self.config.poll.error_backoff;
@@ -223,6 +225,7 @@ impl ConsumerRuntime {
         let batch_timeout = Duration::from_millis(self.config.batch_timeout_ms.max(1));
 
         loop {
+            let permit = Self::acquire_slot(&semaphore).await?;
             match message_fetcher.fetch().await {
                 Ok(Some(message)) => {
                     if batch_size > 1 {
@@ -232,7 +235,7 @@ impl ConsumerRuntime {
                             Ok(messages) => {
                                 Self::spawn_batch_task(
                                     messages,
-                                    &semaphore,
+                                    permit,
                                     &self.dispatcher,
                                     &self.retry_policy,
                                     &self.retry_publisher,
@@ -245,6 +248,7 @@ impl ConsumerRuntime {
                                 );
                             }
                             Err(e) => {
+                                drop(permit);
                                 tracing::error!(error = %e, "Failed to fetch message batch");
                                 tokio::time::sleep(error_backoff).await;
                             }
@@ -252,7 +256,7 @@ impl ConsumerRuntime {
                     } else {
                         Self::spawn_message_task(
                             message,
-                            &semaphore,
+                            permit,
                             &self.dispatcher,
                             &self.retry_policy,
                             &self.retry_publisher,
@@ -266,9 +270,11 @@ impl ConsumerRuntime {
                     }
                 }
                 Ok(None) => {
+                    drop(permit);
                     tokio::time::sleep(idle_backoff).await;
                 }
                 Err(e) => {
+                    drop(permit);
                     tracing::error!(error = %e, "Failed to fetch message");
                     tokio::time::sleep(error_backoff).await;
                 }
@@ -285,7 +291,7 @@ impl ConsumerRuntime {
     where
         MF: MessageFetcher + Send + ?Sized,
     {
-        let semaphore = Arc::new(Semaphore::new(self.config.poll.concurrency));
+        let semaphore = Arc::new(Semaphore::new(self.config.poll.concurrency.max(1)));
         let mut tasks: JoinSet<Result<(), ConsumerError>> = JoinSet::new();
         let idle_backoff = self.config.poll.idle_backoff;
         let error_backoff = self.config.poll.error_backoff;
@@ -293,8 +299,19 @@ impl ConsumerRuntime {
         let batch_timeout = Duration::from_millis(self.config.batch_timeout_ms.max(1));
 
         loop {
+            let permit = tokio::select! {
+                _ = &mut shutdown_rx => {
+                    tracing::info!("Shutdown signal received, stopping consumer");
+                    break;
+                }
+                permit = Self::acquire_slot(&semaphore) => {
+                    permit?
+                }
+            };
+
             tokio::select! {
                 _ = &mut shutdown_rx => {
+                    drop(permit);
                     tracing::info!("Shutdown signal received, stopping consumer");
                     break;
                 }
@@ -306,7 +323,7 @@ impl ConsumerRuntime {
                                     Ok(messages) => {
                                         Self::spawn_batch_task(
                                             messages,
-                                            &semaphore,
+                                            permit,
                                             &self.dispatcher,
                                             &self.retry_policy,
                                             &self.retry_publisher,
@@ -319,6 +336,7 @@ impl ConsumerRuntime {
                                         );
                                     }
                                     Err(e) => {
+                                        drop(permit);
                                         tracing::error!(error = %e, "Failed to fetch message batch");
                                         tokio::time::sleep(error_backoff).await;
                                     }
@@ -326,7 +344,7 @@ impl ConsumerRuntime {
                             } else {
                                 Self::spawn_message_task(
                                     message,
-                                    &semaphore,
+                                    permit,
                                     &self.dispatcher,
                                     &self.retry_policy,
                                     &self.retry_publisher,
@@ -340,9 +358,11 @@ impl ConsumerRuntime {
                             }
                         }
                         Ok(None) => {
+                            drop(permit);
                             tokio::time::sleep(idle_backoff).await;
                         }
                         Err(e) => {
+                            drop(permit);
                             tracing::error!(error = %e, "Failed to fetch message");
                             tokio::time::sleep(error_backoff).await;
                         }
@@ -361,6 +381,16 @@ impl ConsumerRuntime {
 
         tracing::info!("Consumer runtime stopped gracefully");
         Ok(())
+    }
+
+    async fn acquire_slot(
+        semaphore: &Arc<Semaphore>,
+    ) -> Result<OwnedSemaphorePermit, ConsumerError> {
+        semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ConsumerError::Configuration("consumer semaphore closed".into()))
     }
 
     async fn fetch_batch<MF>(
@@ -400,7 +430,7 @@ impl ConsumerRuntime {
     #[allow(clippy::too_many_arguments)]
     fn spawn_message_task(
         message: Message,
-        semaphore: &Arc<Semaphore>,
+        permit: OwnedSemaphorePermit,
         dispatcher: &Arc<dyn Dispatcher>,
         retry_policy: &RetryPolicy,
         retry_publisher: &Option<Arc<dyn RetryPublisher>>,
@@ -411,7 +441,6 @@ impl ConsumerRuntime {
         idempotent: bool,
         key_locks: &OrderedKeyLocks,
     ) {
-        let semaphore = semaphore.clone();
         let dispatcher = dispatcher.clone();
         let key_locks = key_locks.clone();
         let retry_policy = retry_policy.clone();
@@ -420,46 +449,36 @@ impl ConsumerRuntime {
         let idempotency_store = idempotent.then(|| idempotency_store.clone());
 
         tasks.spawn(async move {
-            match semaphore.acquire().await {
-                Ok(permit) => {
-                    let _permit = permit;
-                    if ordered {
-                        let key = Self::ordered_key(&message);
-                        let lock = {
-                            let mut locks = key_locks.lock().await;
-                            locks
-                                .entry(key)
-                                .or_insert_with(|| Arc::new(Mutex::new(())))
-                                .clone()
-                        };
-                        let _key_guard = lock.lock().await;
-                        Self::process_message(
-                            dispatcher,
-                            message,
-                            retry_policy,
-                            retry_publisher,
-                            dead_letter_publisher,
-                            idempotency_store,
-                        )
-                        .await
-                    } else {
-                        Self::process_message(
-                            dispatcher,
-                            message,
-                            retry_policy,
-                            retry_publisher,
-                            dead_letter_publisher,
-                            idempotency_store,
-                        )
-                        .await
-                    }
-                }
-                Err(_) => {
-                    tracing::error!("Consumer semaphore closed");
-                    Err(ConsumerError::Configuration(
-                        "consumer semaphore closed".into(),
-                    ))
-                }
+            let _permit = permit;
+            if ordered {
+                let key = Self::ordered_key(&message);
+                let lock = {
+                    let mut locks = key_locks.lock().await;
+                    locks
+                        .entry(key)
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                };
+                let _key_guard = lock.lock().await;
+                Self::process_message(
+                    dispatcher,
+                    message,
+                    retry_policy,
+                    retry_publisher,
+                    dead_letter_publisher,
+                    idempotency_store,
+                )
+                .await
+            } else {
+                Self::process_message(
+                    dispatcher,
+                    message,
+                    retry_policy,
+                    retry_publisher,
+                    dead_letter_publisher,
+                    idempotency_store,
+                )
+                .await
             }
         });
 
@@ -475,7 +494,7 @@ impl ConsumerRuntime {
     #[allow(clippy::too_many_arguments)]
     fn spawn_batch_task(
         messages: Vec<Message>,
-        semaphore: &Arc<Semaphore>,
+        permit: OwnedSemaphorePermit,
         dispatcher: &Arc<dyn Dispatcher>,
         retry_policy: &RetryPolicy,
         retry_publisher: &Option<Arc<dyn RetryPublisher>>,
@@ -486,7 +505,6 @@ impl ConsumerRuntime {
         idempotent: bool,
         key_locks: &OrderedKeyLocks,
     ) {
-        let semaphore = semaphore.clone();
         let dispatcher = dispatcher.clone();
         let key_locks = key_locks.clone();
         let retry_policy = retry_policy.clone();
@@ -495,38 +513,28 @@ impl ConsumerRuntime {
         let idempotency_store = idempotent.then(|| idempotency_store.clone());
 
         tasks.spawn(async move {
-            match semaphore.acquire().await {
-                Ok(permit) => {
-                    let _permit = permit;
-                    if ordered {
-                        Self::process_ordered_batch(
-                            dispatcher,
-                            messages,
-                            retry_policy,
-                            retry_publisher,
-                            dead_letter_publisher,
-                            idempotency_store,
-                            key_locks,
-                        )
-                        .await
-                    } else {
-                        Self::process_batch(
-                            dispatcher,
-                            messages,
-                            retry_policy,
-                            retry_publisher,
-                            dead_letter_publisher,
-                            idempotency_store,
-                        )
-                        .await
-                    }
-                }
-                Err(_) => {
-                    tracing::error!("Consumer semaphore closed");
-                    Err(ConsumerError::Configuration(
-                        "consumer semaphore closed".into(),
-                    ))
-                }
+            let _permit = permit;
+            if ordered {
+                Self::process_ordered_batch(
+                    dispatcher,
+                    messages,
+                    retry_policy,
+                    retry_publisher,
+                    dead_letter_publisher,
+                    idempotency_store,
+                    key_locks,
+                )
+                .await
+            } else {
+                Self::process_batch(
+                    dispatcher,
+                    messages,
+                    retry_policy,
+                    retry_publisher,
+                    dead_letter_publisher,
+                    idempotency_store,
+                )
+                .await
             }
         });
 
@@ -570,6 +578,9 @@ impl ConsumerRuntime {
             groups.entry(key).or_default().push(message);
         }
 
+        let mut key_tasks = JoinSet::new();
+        let mut in_flight = 0usize;
+
         for key in keys {
             let Some(group) = groups.remove(&key) else {
                 continue;
@@ -581,19 +592,49 @@ impl ConsumerRuntime {
                     .or_insert_with(|| Arc::new(Mutex::new(())))
                     .clone()
             };
-            let _key_guard = lock.lock().await;
-            Self::process_batch(
-                dispatcher.clone(),
-                group,
-                retry_policy.clone(),
-                retry_publisher.clone(),
-                dead_letter_publisher.clone(),
-                idempotency_store.clone(),
-            )
-            .await?;
+            let dispatcher = dispatcher.clone();
+            let retry_policy = retry_policy.clone();
+            let retry_publisher = retry_publisher.clone();
+            let dead_letter_publisher = dead_letter_publisher.clone();
+            let idempotency_store = idempotency_store.clone();
+            key_tasks.spawn(async move {
+                let _key_guard = lock.lock().await;
+                Self::process_batch(
+                    dispatcher,
+                    group,
+                    retry_policy,
+                    retry_publisher,
+                    dead_letter_publisher,
+                    idempotency_store,
+                )
+                .await
+            });
+            in_flight += 1;
+
+            if in_flight >= ORDERED_BATCH_KEY_CONCURRENCY {
+                Self::join_ordered_batch_key_task(&mut key_tasks).await?;
+                in_flight -= 1;
+            }
+        }
+
+        while in_flight > 0 {
+            Self::join_ordered_batch_key_task(&mut key_tasks).await?;
+            in_flight -= 1;
         }
 
         Ok(())
+    }
+
+    async fn join_ordered_batch_key_task(
+        key_tasks: &mut JoinSet<Result<(), ConsumerError>>,
+    ) -> Result<(), ConsumerError> {
+        match key_tasks.join_next().await {
+            Some(Ok(result)) => result,
+            Some(Err(err)) => Err(ConsumerError::Handler(format!(
+                "ordered batch key task join failed: {err}"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// 处理单条消息
@@ -1080,7 +1121,9 @@ mod tests {
     use super::*;
     use crate::mq::consumer::types::{ContentType, MessageAck, MessageContext};
     use flare_core_base::context::Context;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::{sync::Notify, time::timeout};
 
     struct CountingAck {
         acked: Arc<AtomicUsize>,
@@ -1243,6 +1286,54 @@ mod tests {
         }
     }
 
+    struct BlockingDispatcher {
+        started: Arc<AtomicUsize>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Dispatcher for BlockingDispatcher {
+        async fn dispatch(&self, _message: Message) -> Result<MessageResult, ConsumerError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.release.notified().await;
+            Ok(MessageResult::Ack)
+        }
+
+        async fn dispatch_batch(
+            &self,
+            messages: Vec<Message>,
+        ) -> Result<Vec<MessageResult>, ConsumerError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.release.notified().await;
+            Ok(vec![MessageResult::Ack; messages.len()])
+        }
+
+        fn register(
+            &mut self,
+            _topic: String,
+            _handler: Arc<dyn super::super::handler::MessageHandler>,
+        ) -> Result<(), ConsumerError> {
+            Ok(())
+        }
+
+        fn topics(&self) -> Vec<String> {
+            vec!["test.topic".to_string()]
+        }
+    }
+
+    struct VecFetcher {
+        messages: VecDeque<Message>,
+        fetches: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessageFetcher for VecFetcher {
+        async fn fetch(&mut self) -> Result<Option<Message>, ConsumerError> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(self.messages.pop_front())
+        }
+    }
+
     struct CountingRetryPublisher {
         published: Arc<AtomicUsize>,
     }
@@ -1290,6 +1381,53 @@ mod tests {
 
     fn default_retry_policy() -> RetryPolicy {
         RetryPolicy::new(3, true)
+    }
+
+    #[tokio::test]
+    async fn run_with_shutdown_applies_backpressure_before_fetching_next_message() {
+        let ack_handle: Arc<dyn MessageAck> = Arc::new(CountingAck {
+            acked: Arc::new(AtomicUsize::new(0)),
+            nacked: Arc::new(AtomicUsize::new(0)),
+            termed: Arc::new(AtomicUsize::new(0)),
+        });
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let mut fetcher = VecFetcher {
+            messages: VecDeque::from(vec![
+                test_message("m1", ack_handle.clone()),
+                test_message("m2", ack_handle.clone()),
+                test_message("m3", ack_handle),
+            ]),
+            fetches: fetches.clone(),
+        };
+        let runtime = ConsumerRuntime::new(
+            ConsumerConfig::new().with_concurrency(1),
+            Arc::new(BlockingDispatcher {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let handle =
+            tokio::spawn(async move { runtime.run_with_shutdown(&mut fetcher, shutdown_rx).await });
+
+        while started.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+
+        shutdown_tx.send(()).unwrap();
+        release.notify_waiters();
+
+        timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1404,8 +1542,10 @@ mod tests {
         .await
         .expect("ordered batch should succeed");
 
+        let mut actual = batches.lock().await.clone();
+        actual.sort();
         assert_eq!(
-            *batches.lock().await,
+            actual,
             vec![
                 vec!["a1".to_string(), "a2".to_string()],
                 vec!["b1".to_string(), "b2".to_string()],
