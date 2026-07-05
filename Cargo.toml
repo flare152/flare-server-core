@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 rust-version = "1.94.0"
 authors = ["Flare Team"]
@@ -84,14 +84,14 @@ rdkafka = { version = "0.36", features = ["cmake-build"] }
 prometheus = "0.14"
 
 # ===== 内部 crate =====
-flare-core-base = { version = "1.0.2", path = "flare-core-base" }
-flare-core-transport = { version = "1.0.2", path = "flare-core-transport" }
-flare-core-infra = { version = "1.0.2", path = "flare-core-infra" }
-flare-core-messaging = { version = "1.0.2", path = "flare-core-messaging" }
-flare-core-runtime = { version = "1.0.2", path = "flare-core-runtime" }
+flare-core-base = "1.0.3"
+flare-core-transport = "1.0.3"
+flare-core-infra = "1.0.3"
+flare-core-messaging = "1.0.3"
+flare-core-runtime = "1.0.3"
 
 # ===== Proto =====
-flare-proto = { version = "1.0.3", path = "../flare-proto" }
+flare-proto = "1.0.3"
 
 [package]
 name = "flare-server-core"
