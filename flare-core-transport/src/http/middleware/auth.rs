@@ -73,9 +73,14 @@ pub async fn auth_middleware(
                 "Token validated successfully"
             );
 
-            // 5. 将用户信息注入到请求 Header 中
+            // 5. 将用户信息注入到请求 Header 中。
+            // 身份头一律先剥离再按 claims 注入：claims 缺某声明时绝不放行客户端自带的
+            // 同名头（否则不带 tenant 声明的签发路径会成为跨租户逃逸口）。
             let mut request = request;
             let headers = request.headers_mut();
+            headers.remove(keys::USER_ID);
+            headers.remove(keys::DEVICE_ID);
+            headers.remove(keys::TENANT_ID);
 
             // 注入用户 ID
             if let Ok(user_id) = HeaderValue::from_str(&claims.sub) {
@@ -112,9 +117,17 @@ pub async fn auth_middleware(
 /// 如果提供了 Token 则验证,否则继续执行
 pub async fn optional_auth_middleware(
     Extension(token_service): Extension<Arc<TokenService>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
+    // 身份头一律先剥离：无 token / 坏 token 的放行路径绝不能把客户端伪造的
+    // x-user-id / x-device-id / x-tenant-id 透传给下游。
+    {
+        let headers = request.headers_mut();
+        headers.remove(keys::USER_ID);
+        headers.remove(keys::DEVICE_ID);
+        headers.remove(keys::TENANT_ID);
+    }
     let headers = request.headers();
 
     // 1. 提取 Authorization Header
@@ -144,7 +157,6 @@ pub async fn optional_auth_middleware(
             );
 
             // 4. 将用户信息注入到请求 Header 中
-            let mut request = request;
             let headers = request.headers_mut();
 
             if let Ok(user_id) = HeaderValue::from_str(&claims.sub) {
