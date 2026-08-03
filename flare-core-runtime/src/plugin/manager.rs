@@ -141,7 +141,6 @@ impl Default for PluginManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::TaskState;
 
     struct TestPlugin {
         name: String,
