@@ -126,10 +126,12 @@ pub fn extract_device_id(ctx: &Ctx) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// 创建带追踪信息的 Metadata
+/// 创建带追踪信息的 Metadata（trace_id 含非法字符时静默跳过，与 `encode_context_to_metadata` 同款处理）
 pub fn create_traced_metadata(trace_id: &str) -> tonic::metadata::MetadataMap {
     let mut metadata = tonic::metadata::MetadataMap::new();
-    metadata.insert("x-trace-id", trace_id.parse().unwrap());
+    if let Ok(value) = trace_id.parse() {
+        metadata.insert("x-trace-id", value);
+    }
     metadata
 }
 

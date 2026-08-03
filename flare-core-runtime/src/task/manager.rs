@@ -77,6 +77,7 @@ impl TaskManager {
         self.config = config;
     }
 
+    #[cfg(test)]
     pub(crate) fn shutdown_timeout(&self) -> Duration {
         self.config.shutdown_timeout
     }
