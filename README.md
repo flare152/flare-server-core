@@ -12,9 +12,9 @@
 > - **`HttpHookTokenValidator`** —— 把 token POST 到你自己的接口，
 >   **这是接入自有用户体系的入口**。
 >
-> 业务规则同理：`flare-im-core/crates/flare-im-hooks` 提供 8 个扩展点
+> 业务规则同理：`flare-im-core/crates/flare-im-hooks` 提供 9 个扩展点
 > （PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction /
-> ConversationLifecycle / ConversationMember）。
+> ConversationLifecycle / ConversationMember / GetConversationParticipants）。
 >
 > 要上生产，你需要自行实现用户体系并按上述契约接入 —— 与 Sendbird /
 > Twilio Conversations 的「自带身份」模型一致，区别是 Flare 可自托管、
@@ -169,7 +169,7 @@ Licensed under the [Apache License, Version 2.0](LICENSE).
 |---|---|
 | **五分钟跑起来** | [QUICKSTART](https://github.com/flare-im/flare-im-core-server/blob/main/QUICKSTART.md) —— 起服务、手签 token、调通接口，**不需要自建用户体系** |
 | 接入自己的用户系统 | 实现 `TokenValidator`（`CoreJwtTokenValidator` 本地验签 / `HttpHookTokenValidator` 调你的接口） |
-| 加自己的业务规则 | `flare-im-hooks` 的 8 个扩展点：PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction / ConversationLifecycle / ConversationMember |
+| 加自己的业务规则 | `flare-im-hooks` 的 9 个扩展点：PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction / ConversationLifecycle / ConversationMember / GetConversationParticipants |
 | 做界面 | [`@flare-im/vue-ui`](https://www.npmjs.com/package/@flare-im/vue-ui) —— 107 个组件，四端一致的契约 |
 | 报安全问题 | [SECURITY.md](SECURITY.md)，**请勿开公开 issue** |
 
