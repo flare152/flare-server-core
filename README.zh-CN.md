@@ -1,6 +1,6 @@
 # Flare Server Core
 
-English · [中文](README.zh-CN.md)
+[English](README.md) · 中文
 
 > ## ℹ️ 这是通信基础设施，不是开箱即用的 IM 产品
 >
@@ -30,70 +30,67 @@ English · [中文](README.zh-CN.md)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 
-`flare-server-core` is the server-side infrastructure toolkit used by Flare IM
-services. It packages reusable runtime, transport, messaging, authentication,
-context propagation, service discovery, telemetry, and error-handling building
-blocks into a small set of composable crates.
+`flare-server-core` 是 Flare IM 各项服务所使用的服务端基础设施工具包。它把可复用的
+运行时、传输、消息、鉴权、上下文传播、服务发现、遥测以及错误处理等构建块，打包成
+一组小而可组合的 crate。
 
-The package is business-neutral: it does not own IM product rules, inbox sync
-policy, moderation, or tenant-specific workflows. Those belong in application
-services and higher-level domain crates.
+本包与业务无关：它不承载 IM 产品规则、收件箱同步策略、内容审核或租户专属的工作流。
+这些应归属于应用服务和更上层的领域 crate。
 
-API documentation: [docs.rs/flare-server-core](https://docs.rs/flare-server-core)
+API 文档：[docs.rs/flare-server-core](https://docs.rs/flare-server-core)
 
-## Installation
+## 安装
 
 ```toml
 [dependencies]
 flare-server-core = "1.0.1"
 ```
 
-Feature-focused examples:
+按功能聚焦的示例：
 
 ```toml
-# HTTP + auth + telemetry
+# HTTP + 鉴权 + 遥测
 flare-server-core = { version = "1.0.1", features = ["http", "auth", "telemetry"] }
 
-# gRPC service with discovery
+# 带服务发现的 gRPC 服务
 flare-server-core = { version = "1.0.1", features = ["grpc", "discovery"] }
 
-# Eventing and MQ integrations
+# 事件与 MQ 集成
 flare-server-core = { version = "1.0.1", features = ["nats", "kafka"] }
 
-# Everything
+# 全部功能
 flare-server-core = { version = "1.0.1", features = ["full"] }
 ```
 
-The workspace also publishes the lower-level crates with the same version:
+该工作区还以相同版本发布了各个更底层的 crate：
 
-| Crate | Purpose |
-|-------|---------|
-| `flare-core-base` | Context, errors, configuration, IDs, and shared types. |
-| `flare-core-runtime` | Service lifecycle, task orchestration, health, shutdown, and state tracking. |
-| `flare-core-infra` | KV, token validation, auth helpers, and telemetry setup. |
-| `flare-core-transport` | HTTP, gRPC, service discovery, and transport middleware. |
-| `flare-core-messaging` | Event bus, topic bus, NATS, Kafka, producers, consumers, and retry helpers. |
-| `flare-server-core` | Aggregated re-export crate for server applications. |
+| Crate | 用途 |
+|-------|-------|
+| `flare-core-base` | 上下文、错误、配置、ID 以及共享类型。 |
+| `flare-core-runtime` | 服务生命周期、任务编排、健康检查、优雅关闭以及状态追踪。 |
+| `flare-core-infra` | KV、token 校验、鉴权辅助工具以及遥测配置。 |
+| `flare-core-transport` | HTTP、gRPC、服务发现以及传输中间件。 |
+| `flare-core-messaging` | 事件总线、主题总线、NATS、Kafka、生产者、消费者以及重试辅助工具。 |
+| `flare-server-core` | 面向服务端应用的聚合再导出 crate。 |
 
-All of them use version `1.0.1` so application teams can keep dependency
-versions aligned.
+它们全部使用版本 `1.0.1`，以便应用团队保持依赖版本对齐。
 
-## Feature Flags
+## 功能开关（Feature Flags）
 
-| Feature | Description |
-|---------|-------------|
-| `http` | Axum HTTP helpers, response models, and middleware. |
-| `grpc` | Tonic gRPC client/server context utilities and middleware. |
-| `discovery` | Service discovery and client-side service selection. |
-| `nats` | NATS JetStream producer/consumer support. |
-| `kafka` | Kafka producer/consumer support. |
-| `kv` | Infrastructure KV abstractions. |
-| `auth` | Token validation, principal model, and composite validators. |
-| `telemetry` | Tracing subscriber and OpenTelemetry helpers. |
-| `proto` | Optional bridge to `flare-proto` structured payloads. |
-| `full` | Enables all public server-core capabilities. |
+| Feature | 说明 |
+|---------|-------|
+| `http` | Axum HTTP 辅助工具、响应模型以及中间件。 |
+| `grpc` | Tonic gRPC 客户端/服务端上下文工具以及中间件。 |
+| `discovery` | 服务发现以及客户端侧的服务选择。 |
+| `nats` | NATS JetStream 生产者/消费者支持。 |
+| `kafka` | Kafka 生产者/消费者支持。 |
+| `kv` | 基础设施 KV 抽象。 |
+| `auth` | Token 校验、principal 模型以及组合校验器。 |
+| `telemetry` | Tracing subscriber 以及 OpenTelemetry 辅助工具。 |
+| `proto` | 到 `flare-proto` 结构化载荷的可选桥接。 |
+| `full` | 启用所有公开的 server-core 能力。 |
 
-## Architecture
+## 架构
 
 ```text
 Application service
@@ -111,7 +108,7 @@ flare-server-core        re-export layer for service code
 +------------------------+------------------------+
 ```
 
-## Runtime Example
+## 运行时示例
 
 ```rust,no_run
 use flare_server_core::ServiceRuntime;
@@ -128,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## Context And Errors
+## 上下文与错误
 
 ```rust
 use flare_server_core::{Context, ErrorBuilder, ErrorCode, Result};
@@ -140,9 +137,9 @@ fn require_tenant(ctx: &Context) -> Result<&str> {
 }
 ```
 
-## Release Verification
+## 发布校验
 
-For package-level checks:
+包级别的检查：
 
 ```bash
 cargo test --workspace --all-features
@@ -150,7 +147,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo package -p flare-server-core
 ```
 
-When publishing the full workspace, publish dependency crates first:
+发布整个工作区时，先发布依赖 crate：
 
 1. `flare-core-base`
 2. `flare-core-runtime`
@@ -159,9 +156,9 @@ When publishing the full workspace, publish dependency crates first:
 5. `flare-core-messaging`
 6. `flare-server-core`
 
-## License
+## 许可证
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+基于 [Apache License, Version 2.0](LICENSE) 授权。
 
 ---
 
