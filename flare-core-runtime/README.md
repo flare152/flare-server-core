@@ -1,68 +1,70 @@
-# Flare Core Runtime - 统一运行时框架
+# Flare Core Runtime - Unified Runtime Framework
+
+English · [中文](README.zh-CN.md)
 
 [![Rust](https://img.shields.io/badge/rust-1.94.0%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**强大、稳定、通用**的 Rust 运行时框架，支持 10 亿+ 在线用户的高性能 IM 服务端。
+A **powerful, stable, and general-purpose** Rust runtime framework for high-performance IM servers supporting 1 billion+ online users.
 
-## 🎯 核心特性
+## 🎯 Core Features
 
-### 统一服务启动
-- ✅ **HTTP 服务**: axum, volo-http, actix-web
-- ✅ **gRPC 服务**: tonic, volo
-- ✅ **MQ 消费者**: Kafka, RocketMQ
-- ✅ **自定义任务**: 任意 async 任务
-- ✅ **定时任务**: Cron 表达式调度
+### Unified Service Startup
+- ✅ **HTTP services**: axum, volo-http, actix-web
+- ✅ **gRPC services**: tonic, volo
+- ✅ **MQ consumers**: Kafka, RocketMQ
+- ✅ **Custom tasks**: any async task
+- ✅ **Scheduled tasks**: Cron expression scheduling
 
-### 优雅停止
-- ✅ **多信号源**: Ctrl+C, SIGTERM, SIGINT, 自定义通道
-- ✅ **依赖顺序关闭**: 按依赖关系逆序关闭
-- ✅ **超时强制终止**: 可配置超时时间
+### Graceful Shutdown
+- ✅ **Multiple signal sources**: Ctrl+C, SIGTERM, SIGINT, custom channels
+- ✅ **Dependency-ordered shutdown**: shut down in reverse dependency order
+- ✅ **Timeout-based forced termination**: configurable timeout duration
 
-### 服务编排
-- ✅ **任务依赖管理**: 拓扑排序、循环依赖检测
-- ✅ **健康检查**: 定期检查、失败阈值
-- ✅ **服务注册/注销**: Consul, Etcd, Nacos
+### Service Orchestration
+- ✅ **Task dependency management**: topological sorting, circular dependency detection
+- ✅ **Health checks**: periodic checks, failure thresholds
+- ✅ **Service registration/deregistration**: Consul, Etcd, Nacos
 
-### 状态监控
-- ✅ **任务状态追踪**: 实时状态、事件通知
-- ✅ **指标暴露**: Prometheus 格式
-- ✅ **日志追踪**: 结构化日志
+### State Monitoring
+- ✅ **Task state tracking**: real-time state, event notifications
+- ✅ **Metrics exposure**: Prometheus format
+- ✅ **Log tracing**: structured logging
 
-### 可扩展性
-- ✅ **插件化架构**: 生命周期钩子
-- ✅ **中间件链**: 任务执行前后插入逻辑
-- ✅ **自定义适配器**: 支持未支持的框架
+### Extensibility
+- ✅ **Pluggable architecture**: lifecycle hooks
+- ✅ **Middleware chain**: insert logic before and after task execution
+- ✅ **Custom adapters**: support for unsupported frameworks
 
-### 简化模式
-- ✅ **MQ 消费者运行器**: 无需服务名和地址
-- ✅ **自定义任务运行器**: 简洁的任务管理
-- ✅ **灵活选择**: 完整模式 vs 简化模式
+### Simplified Mode
+- ✅ **MQ consumer runner**: no service name or address required
+- ✅ **Custom task runner**: concise task management
+- ✅ **Flexible choice**: full mode vs. simplified mode
 
-## 📦 架构设计
+## 📦 Architecture Design
 
-### 职责分离
+### Separation of Responsibilities
 
-`flare-core-runtime` **只提供规范**（trait 定义、配置、核心抽象），具体实现由其他 crate 提供：
+`flare-core-runtime` **provides only the specification** (trait definitions, configuration, core abstractions); concrete implementations are provided by other crates:
 
-- `flare-core-transport` - HTTP/gRPC 适配器实现
-- `flare-core-messaging` - MQ 消费者适配器实现
+- `flare-core-transport` - HTTP/gRPC adapter implementations
+- `flare-core-messaging` - MQ consumer adapter implementations
 
-### 核心抽象
+### Core Abstractions
 
-| Trait | 说明 |
-|-------|------|
-| `Task` | 任务抽象，所有任务必须实现 |
-| `ShutdownSignal` | 停机信号抽象 |
-| `ServiceRegistry` | 服务注册抽象 |
-| `HealthCheck` | 健康检查抽象 |
-| `Plugin` | 插件抽象 |
-| `Middleware` | 中间件抽象 |
-| `MetricsCollector` | 指标收集抽象 |
+| Trait | Description |
+|-------|-------------|
+| `Task` | Task abstraction; all tasks must implement it |
+| `ShutdownSignal` | Shutdown signal abstraction |
+| `ServiceRegistry` | Service registration abstraction |
+| `HealthCheck` | Health check abstraction |
+| `Plugin` | Plugin abstraction |
+| `Middleware` | Middleware abstraction |
+| `MetricsCollector` | Metrics collection abstraction |
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 添加依赖
+### Add Dependency
 
 ```toml
 [dependencies]
@@ -71,7 +73,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 ```
 
-### 基础示例
+### Basic Example
 
 ```rust
 use flare_core_runtime::ServiceRuntime;
@@ -79,28 +81,28 @@ use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 创建运行时
+    // Create the runtime
     let runtime = ServiceRuntime::new("my-service")
         .with_address("0.0.0.0:8080".parse().unwrap())
         .add_spawn("grpc-server", async {
-            // 启动 gRPC 服务
+            // Start the gRPC service
             Ok(())
         })
         .add_spawn("kafka-consumer", async {
-            // 启动 Kafka 消费者
+            // Start the Kafka consumer
             Ok(())
         });
 
-    // 运行（等待 Ctrl+C）
+    // Run (wait for Ctrl+C)
     runtime.run().await?;
 
     Ok(())
 }
 ```
 
-### 简化模式示例
+### Simplified Mode Examples
 
-#### 仅运行 MQ 消费者
+#### Run MQ Consumers Only
 
 ```rust
 use flare_core_runtime::ServiceRuntime;
@@ -109,11 +111,11 @@ use flare_core_runtime::ServiceRuntime;
 async fn main() -> anyhow::Result<()> {
     ServiceRuntime::mq_consumer()
         .add_spawn("kafka-consumer", async {
-            // 消费 Kafka 消息
+            // Consume Kafka messages
             Ok(())
         })
         .add_spawn("nats-consumer", async {
-            // 消费 NATS 消息
+            // Consume NATS messages
             Ok(())
         })
         .run().await?;
@@ -122,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-#### 仅运行自定义任务
+#### Run Custom Tasks Only
 
 ```rust
 use flare_core_runtime::ServiceRuntime;
@@ -131,11 +133,11 @@ use flare_core_runtime::ServiceRuntime;
 async fn main() -> anyhow::Result<()> {
     ServiceRuntime::tasks()
         .add_spawn("data-sync", async {
-            // 数据同步任务
+            // Data synchronization task
             Ok(())
         })
         .add_spawn("cache-refresh", async {
-            // 缓存刷新任务
+            // Cache refresh task
             Ok(())
         })
         .run().await?;
@@ -144,10 +146,10 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-更多简化模式用法请参考 [SIMPLE_MODE.md](SIMPLE_MODE.md)。
+For more simplified-mode usage, see [SIMPLE_MODE.md](SIMPLE_MODE.md).
 
 
-### 带服务注册
+### With Service Registration
 
 ```rust
 use flare_core_runtime::ServiceRuntime;
@@ -158,12 +160,12 @@ async fn main() -> anyhow::Result<()> {
         .with_address("0.0.0.0:8080".parse().unwrap())
         .add_spawn("grpc", async { Ok(()) });
 
-    // 带服务注册
+    // With service registration
     runtime.run_with_registration(|addr| {
         Box::pin(async move {
-            // 注册到 Consul/Etcd/Nacos
+            // Register to Consul/Etcd/Nacos
             println!("Registering service at {}", addr);
-            Ok(None) // 返回注册器（可选）
+            Ok(None) // Return the registrar (optional)
         })
     }).await?;
 
@@ -171,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### 任务依赖
+### Task Dependencies
 
 ```rust
 use flare_core_runtime::ServiceRuntime;
@@ -179,17 +181,17 @@ use flare_core_runtime::ServiceRuntime;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let runtime = ServiceRuntime::new("my-service")
-        // 先启动数据库
+        // Start the database first
         .add_spawn("database", async {
             println!("Database started");
             Ok(())
         })
-        // 再启动缓存（依赖数据库）
+        // Then start the cache (depends on the database)
         .add_spawn_with_deps("cache", async {
             println!("Cache started");
             Ok(())
         }, vec!["database".to_string()])
-        // 最后启动 gRPC（依赖缓存）
+        // Finally start gRPC (depends on the cache)
         .add_spawn_with_deps("grpc", async {
             println!("gRPC started");
             Ok(())
@@ -200,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### 自定义任务
+### Custom Task
 
 ```rust
 use flare_core_runtime::task::{Task, TaskResult};
@@ -221,10 +223,10 @@ impl Task for MyCustomTask {
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = TaskResult> + Send>> {
         Box::pin(async move {
-            // 任务逻辑
+            // Task logic
             tokio::select! {
                 _ = async {
-                    // 主逻辑
+                    // Main logic
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
@@ -239,9 +241,9 @@ impl Task for MyCustomTask {
 }
 ```
 
-## 📊 状态监控
+## 📊 State Monitoring
 
-### 订阅状态事件
+### Subscribe to State Events
 
 ```rust
 use flare_core_runtime::ServiceRuntime;
@@ -251,10 +253,10 @@ async fn main() -> anyhow::Result<()> {
     let runtime = ServiceRuntime::new("my-service")
         .add_spawn("task-1", async { Ok(()) });
 
-    // 获取状态追踪器
+    // Get the state tracker
     let tracker = runtime.state_tracker();
 
-    // 订阅状态事件
+    // Subscribe to state events
     let mut rx = tracker.subscribe();
 
     tokio::spawn(async move {
@@ -271,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## 🔧 配置
+## 🔧 Configuration
 
 ```rust
 use flare_core_runtime::{ServiceRuntime, RuntimeConfig};
@@ -289,32 +291,32 @@ let runtime = ServiceRuntime::new("my-service")
     .with_config(config);
 ```
 
-## 🎨 技术亮点
+## 🎨 Technical Highlights
 
-1. **Rust 2024 原生 async fn in traits** - 不使用 async-trait 宏
-2. **零成本抽象** - 所有扩展点通过 trait 定义
-3. **线程安全** - 使用 `Arc<RwLock>` 和 `broadcast` 通道
-4. **事件驱动** - 状态变更自动发出事件
-5. **错误处理规范** - 使用 `thiserror` 定义所有错误
-6. **Builder 模式** - 所有配置提供 Builder 方法
-7. **文档完整** - 所有类型都有文档注释和示例
-8. **测试覆盖** - 所有核心组件都有单元测试
+1. **Rust 2024 native async fn in traits** - no async-trait macro used
+2. **Zero-cost abstractions** - all extension points defined via traits
+3. **Thread-safe** - uses `Arc<RwLock>` and `broadcast` channels
+4. **Event-driven** - state changes automatically emit events
+5. **Standardized error handling** - all errors defined with `thiserror`
+6. **Builder pattern** - all configurations provide Builder methods
+7. **Complete documentation** - all types have doc comments and examples
+8. **Test coverage** - all core components have unit tests
 
-## 📚 API 文档
+## 📚 API Documentation
 
-运行 `cargo doc --open` 查看完整的 API 文档。
+Run `cargo doc --open` to view the complete API documentation.
 
-## 🤝 贡献
+## 🤝 Contributing
 
-欢迎贡献代码！请查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解详情。
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
-## 📄 许可证
+## 📄 License
 
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 致谢
+## 🙏 Acknowledgments
 
-感谢以下项目的启发：
-- [Tokio](https://tokio.rs/) - 异步运行时
-- [Tonic](https://github.com/hyperium/tonic) - gRPC 框架
-- [Axum](https://docs.rs/axum/) - Web 框架
+Thanks to the following projects for the inspiration:
+- [Tokio](https://tokio.rs/) - async runtime
+- [Tonic](https://github.com/hyperium/tonic) - gRPC framework
+- [Axum](https://docs.rs/axum/) - Web framework
