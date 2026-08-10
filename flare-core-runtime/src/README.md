@@ -18,19 +18,19 @@
 ```rust
 pub trait Task: Send {
     fn name(&self) -> &str;
-    
+
     /// 获取任务依赖
     /// 返回此任务依赖的其他任务名称列表
     /// 依赖的任务会在此任务之前启动
     fn dependencies(&self) -> Vec<String> {
         Vec::new()  // 默认无依赖
     }
-    
+
     fn run(
         self: Box<Self>,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = TaskResult> + Send>>;
-    
+
     fn ready_check(&self) -> Pin<Box<dyn Future<Output = Result<...>> + Send + '_>>;
 }
 ```
@@ -63,16 +63,16 @@ use std::net::SocketAddr;
 async fn main() -> anyhow::Result<()> {
     let address: SocketAddr = "127.0.0.1:50051".parse()?;
     let handler = SessionGrpcHandler::new(...);
-    
+
     // 创建运行时并添加 gRPC 任务
     let runtime = ServiceRuntime::new("my-service", address)
         .add_grpc_task("grpc-server", address, move |builder| {
             builder.add_service(SessionServiceServer::new(handler))
         });
-    
+
     // 运行服务（不带服务注册）
     runtime.run().await?;
-    
+
     Ok(())
 }
 ```
@@ -90,7 +90,7 @@ use std::net::SocketAddr;
 async fn main() -> anyhow::Result<()> {
     let address: SocketAddr = "127.0.0.1:50051".parse()?;
     let handler = SessionGrpcHandler::new(...);
-    
+
     // 创建运行时并运行（带服务注册）
     ServiceRuntime::new("session", address)
         .add_grpc_task("grpc-server", address, move |builder| {
@@ -104,15 +104,15 @@ async fn main() -> anyhow::Result<()> {
             })
         })
         .await?;
-    
+
     Ok(())
 }
 ```
 
 **优势**：
-- ✅ 自动在任务就绪后注册服务
-- ✅ 如果注册失败，自动关闭服务并退出
-- ✅ 代码简洁，只需一行调用
+- ✓ 自动在任务就绪后注册服务
+- ✓ 如果注册失败，自动关闭服务并退出
+- ✓ 代码简洁，只需一行调用
 
 ### 3. 添加多个任务
 
@@ -122,7 +122,7 @@ use flare_server_core::runtime::{ServiceRuntime, MessageConsumerTask};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let address: SocketAddr = "127.0.0.1:50051".parse()?;
-    
+
     // 创建运行时并添加多个任务
     let runtime = ServiceRuntime::new("my-service", address)
         // 添加 gRPC 任务
@@ -135,9 +135,9 @@ async fn main() -> anyhow::Result<()> {
             "kafka-consumer",
             Box::new(MyKafkaConsumer::new())
         );
-    
+
     runtime.run().await?;
-    
+
     Ok(())
 }
 ```
@@ -154,7 +154,7 @@ use flare_server_core::runtime::ServiceRuntime;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let address: SocketAddr = "127.0.0.1:50051".parse()?;
-    
+
     let runtime = ServiceRuntime::new("my-service", address)
         // 1. 先启动数据库连接池（无依赖）
         .add_spawn("db-pool", async {
@@ -179,10 +179,10 @@ async fn main() -> anyhow::Result<()> {
             },
             vec!["cache".to_string()]
         );
-    
+
     // 任务会按依赖顺序启动：db-pool -> cache -> grpc-server
     runtime.run().await?;
-    
+
     Ok(())
 }
 ```
@@ -208,13 +208,13 @@ let runtime = ServiceRuntime::new("my-service", address)
 #### 依赖关系验证
 
 运行时会自动验证：
-- ✅ **循环依赖检测**：如果检测到循环依赖，会返回错误并列出涉及的任务
-- ✅ **依赖存在性检查**：如果依赖的任务不存在，会返回错误并指出缺失的依赖
+- ✓ **循环依赖检测**：如果检测到循环依赖，会返回错误并列出涉及的任务
+- ✓ **依赖存在性检查**：如果依赖的任务不存在，会返回错误并指出缺失的依赖
 
 **错误示例**：
 
 ```rust
-// ❌ 循环依赖：task-a 依赖 task-b，task-b 依赖 task-a
+// ✗ 循环依赖：task-a 依赖 task-b，task-b 依赖 task-a
 let runtime = ServiceRuntime::new("my-service", address)
     .add_spawn_with_deps("task-a", async { Ok(()) }, vec!["task-b".to_string()])
     .add_spawn_with_deps("task-b", async { Ok(()) }, vec!["task-a".to_string()]);
@@ -224,7 +224,7 @@ let runtime = ServiceRuntime::new("my-service", address)
 ```
 
 ```rust
-// ❌ 不存在的依赖：task-b 依赖不存在的 task-c
+// ✗ 不存在的依赖：task-b 依赖不存在的 task-c
 let runtime = ServiceRuntime::new("my-service", address)
     .add_spawn_with_deps("task-b", async { Ok(()) }, vec!["task-c".to_string()]);
 
@@ -331,7 +331,7 @@ impl Task for MyCustomTask {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn run(
         self: Box<Self>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -393,7 +393,7 @@ pub async fn run(&self) -> Result<()> {
 pub async fn run(&self) -> Result<()> {
     use flare_server_core::runtime::ServiceRuntime;
     use flare_proto::session::session_service_server::SessionServiceServer;
-    
+
     ServiceRuntime::new("session", self.address)
         .add_grpc_task("grpc-server", self.address, move |builder| {
             builder.add_service(SessionServiceServer::new(self.handler.clone()))

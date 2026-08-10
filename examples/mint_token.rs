@@ -24,7 +24,7 @@
 //! curl -H "Authorization: Bearer <token>" http://127.0.0.1:50050/api/v1/...
 //! ```
 //!
-//! ⚠️ **默认密钥仅供本地 demo。** 生产环境必须通过 `FLARE_TOKEN_SECRET` 注入
+//! 注意：**默认密钥仅供本地 demo。** 生产环境必须通过 `FLARE_TOKEN_SECRET` 注入
 //! 强密钥，且与服务端配置一致 —— 弱密钥意味着任何人都能伪造任意用户的 token。
 
 use flare_server_core::TokenService;

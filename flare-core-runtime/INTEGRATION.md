@@ -2,7 +2,7 @@
 
 本文档展示如何使用 `flare-core-runtime` 管理 HTTP、gRPC 和 MQ 消费者服务。
 
-## 📦 依赖配置
+## 依赖配置
 
 ```toml
 [dependencies]
@@ -13,7 +13,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 ```
 
-## 🚀 完整示例
+## 完整示例
 
 ### 1. gRPC 服务
 
@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## 🎯 关键特性
+## 关键特性
 
 ### 依赖管理
 
@@ -222,7 +222,7 @@ tokio::spawn(async move {
 runtime.run().await?;
 ```
 
-## 📊 架构优势
+## 架构优势
 
 1. **统一管理**: 所有服务类型统一管理
 2. **依赖管理**: 自动处理启动顺序
@@ -230,7 +230,7 @@ runtime.run().await?;
 4. **可观测性**: 实时状态追踪
 5. **可扩展**: 支持插件和中间件
 
-## 🔧 高级用法
+## 高级用法
 
 ### 使用插件
 
@@ -272,14 +272,14 @@ health_checker.add_check(Arc::new(DatabaseHealthCheck));
 let is_healthy = health_checker.is_healthy().await;
 ```
 
-## 🎊 总结
+## 总结
 
 通过 `flare-core-runtime` 提供的统一抽象,可以轻松管理各种类型的服务:
 
-- ✅ HTTP 服务 (axum, actix-web)
-- ✅ gRPC 服务 (tonic)
-- ✅ MQ 消费者 (Kafka, NATS)
-- ✅ 自定义任务
-- ✅ 定时任务
+- ✓ HTTP 服务 (axum, actix-web)
+- ✓ gRPC 服务 (tonic)
+- ✓ MQ 消费者 (Kafka, NATS)
+- ✓ 自定义任务
+- ✓ 定时任务
 
 所有服务统一管理,自动处理依赖、优雅停机、状态监控等复杂逻辑。

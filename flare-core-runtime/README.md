@@ -7,41 +7,41 @@ English · [中文](README.zh-CN.md)
 
 A **powerful, stable, and general-purpose** Rust runtime framework for high-performance IM servers supporting 1 billion+ online users.
 
-## 🎯 Core Features
+## Core Features
 
 ### Unified Service Startup
-- ✅ **HTTP services**: axum, volo-http, actix-web
-- ✅ **gRPC services**: tonic, volo
-- ✅ **MQ consumers**: Kafka, RocketMQ
-- ✅ **Custom tasks**: any async task
-- ✅ **Scheduled tasks**: Cron expression scheduling
+- ✓ **HTTP services**: axum, volo-http, actix-web
+- ✓ **gRPC services**: tonic, volo
+- ✓ **MQ consumers**: Kafka, RocketMQ
+- ✓ **Custom tasks**: any async task
+- ✓ **Scheduled tasks**: Cron expression scheduling
 
 ### Graceful Shutdown
-- ✅ **Multiple signal sources**: Ctrl+C, SIGTERM, SIGINT, custom channels
-- ✅ **Dependency-ordered shutdown**: shut down in reverse dependency order
-- ✅ **Timeout-based forced termination**: configurable timeout duration
+- ✓ **Multiple signal sources**: Ctrl+C, SIGTERM, SIGINT, custom channels
+- ✓ **Dependency-ordered shutdown**: shut down in reverse dependency order
+- ✓ **Timeout-based forced termination**: configurable timeout duration
 
 ### Service Orchestration
-- ✅ **Task dependency management**: topological sorting, circular dependency detection
-- ✅ **Health checks**: periodic checks, failure thresholds
-- ✅ **Service registration/deregistration**: Consul, Etcd, Nacos
+- ✓ **Task dependency management**: topological sorting, circular dependency detection
+- ✓ **Health checks**: periodic checks, failure thresholds
+- ✓ **Service registration/deregistration**: Consul, Etcd, Nacos
 
 ### State Monitoring
-- ✅ **Task state tracking**: real-time state, event notifications
-- ✅ **Metrics exposure**: Prometheus format
-- ✅ **Log tracing**: structured logging
+- ✓ **Task state tracking**: real-time state, event notifications
+- ✓ **Metrics exposure**: Prometheus format
+- ✓ **Log tracing**: structured logging
 
 ### Extensibility
-- ✅ **Pluggable architecture**: lifecycle hooks
-- ✅ **Middleware chain**: insert logic before and after task execution
-- ✅ **Custom adapters**: support for unsupported frameworks
+- ✓ **Pluggable architecture**: lifecycle hooks
+- ✓ **Middleware chain**: insert logic before and after task execution
+- ✓ **Custom adapters**: support for unsupported frameworks
 
 ### Simplified Mode
-- ✅ **MQ consumer runner**: no service name or address required
-- ✅ **Custom task runner**: concise task management
-- ✅ **Flexible choice**: full mode vs. simplified mode
+- ✓ **MQ consumer runner**: no service name or address required
+- ✓ **Custom task runner**: concise task management
+- ✓ **Flexible choice**: full mode vs. simplified mode
 
-## 📦 Architecture Design
+## Architecture Design
 
 ### Separation of Responsibilities
 
@@ -62,7 +62,7 @@ A **powerful, stable, and general-purpose** Rust runtime framework for high-perf
 | `Middleware` | Middleware abstraction |
 | `MetricsCollector` | Metrics collection abstraction |
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Add Dependency
 
@@ -241,7 +241,7 @@ impl Task for MyCustomTask {
 }
 ```
 
-## 📊 State Monitoring
+## State Monitoring
 
 ### Subscribe to State Events
 
@@ -273,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ```rust
 use flare_core_runtime::{ServiceRuntime, RuntimeConfig};
@@ -291,7 +291,7 @@ let runtime = ServiceRuntime::new("my-service")
     .with_config(config);
 ```
 
-## 🎨 Technical Highlights
+## Technical Highlights
 
 1. **Rust 2024 native async fn in traits** - no async-trait macro used
 2. **Zero-cost abstractions** - all extension points defined via traits
@@ -302,19 +302,19 @@ let runtime = ServiceRuntime::new("my-service")
 7. **Complete documentation** - all types have doc comments and examples
 8. **Test coverage** - all core components have unit tests
 
-## 📚 API Documentation
+## API Documentation
 
 Run `cargo doc --open` to view the complete API documentation.
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 Thanks to the following projects for the inspiration:
 - [Tokio](https://tokio.rs/) - async runtime

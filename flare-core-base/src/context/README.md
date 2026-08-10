@@ -7,34 +7,34 @@
 ## 核心特性
 
 ### 1. 类型安全
-- ✅ 所有元数据都是显式字段，编译时检查
-- ✅ 支持自定义数据存储（使用 `TypeMap`，类型安全）
-- ✅ 可以存储任意 `Send + Sync` 类型的数据（包括数据库连接、服务实例等）
+- ✓ 所有元数据都是显式字段，编译时检查
+- ✓ 支持自定义数据存储（使用 `TypeMap`，类型安全）
+- ✓ 可以存储任意 `Send + Sync` 类型的数据（包括数据库连接、服务实例等）
 
 ### 2. 显式传递
-- ✅ Context 作为函数参数传递，不使用隐式全局变量
-- ✅ 不使用 TLS，所有 Context 必须显式传递
+- ✓ Context 作为函数参数传递，不使用隐式全局变量
+- ✓ 不使用 TLS，所有 Context 必须显式传递
 
 ### 3. 取消语义
-- ✅ 基于 `tokio::sync::watch::channel` 实现
-- ✅ 支持 `cancel()`、`is_cancelled()`、`cancelled().await`
-- ✅ 父子 Context 取消传播
+- ✓ 基于 `tokio::sync::watch::channel` 实现
+- ✓ 支持 `cancel()`、`is_cancelled()`、`cancelled().await`
+- ✓ 父子 Context 取消传播
 
 ### 4. 超时支持
-- ✅ `with_timeout(Duration)` - 创建带超时的子 Context
-- ✅ `with_deadline(Instant)` - 创建带截止时间的子 Context
-- ✅ `remaining_time()` - 获取剩余时间
-- ✅ 自动选择更早的截止时间（父子 Context）
+- ✓ `with_timeout(Duration)` - 创建带超时的子 Context
+- ✓ `with_deadline(Instant)` - 创建带截止时间的子 Context
+- ✓ `remaining_time()` - 获取剩余时间
+- ✓ 自动选择更早的截止时间（父子 Context）
 
 ### 5. 父子关系
-- ✅ `child()` - 创建子 Context
-- ✅ 父 Context 取消 → 子 Context 自动取消
-- ✅ 子 Context 取消不影响父 Context
+- ✓ `child()` - 创建子 Context
+- ✓ 父 Context 取消 → 子 Context 自动取消
+- ✓ 子 Context 取消不影响父 Context
 
 ### 6. 上下文兼容
-- ✅ 兼容 `TenantContext`、`RequestContext`、`TraceContext`、`ActorContext`、`DeviceContext`、`AuditContext`
-- ✅ 支持从现有中间件（`RequestContextLayer`、`TenantLayer`）自动提取
-- ✅ 支持自动构建 gRPC 请求 metadata
+- ✓ 兼容 `TenantContext`、`RequestContext`、`TraceContext`、`ActorContext`、`DeviceContext`、`AuditContext`
+- ✓ 支持从现有中间件（`RequestContextLayer`、`TenantLayer`）自动提取
+- ✓ 支持自动构建 gRPC 请求 metadata
 
 ## 核心 API
 
@@ -121,14 +121,14 @@ use tokio::select;
 async fn process_request(ctx: &Context) -> Result<String> {
     // 检查取消状态
     ctx.ensure_not_cancelled()?;
-    
+
     // 获取自定义数据
     let pool: Option<&Arc<PgPool>> = ctx.get_data();
-    
+
     // 获取上下文
     let tenant = ctx.tenant();
     let request = ctx.request();
-    
+
     // 在 select! 中使用
     select! {
         result = do_work() => result,
@@ -183,25 +183,25 @@ async fn my_handler(
     request: Request<MyRequest>,
 ) -> Result<Response<MyResponse>, Status> {
     let ctx = extract_context(&request)?;
-    
+
     // 使用 Context
     if ctx.is_cancelled() {
         return Err(Status::cancelled("request cancelled"));
     }
-    
+
     // 获取上下文
     let tenant = ctx.tenant();
     let request_ctx = ctx.request();
-    
+
     // 获取自定义数据
     let db_pool: Option<&Arc<PgPool>> = ctx.get_data();
-    
+
     // 创建子 Context 用于下游调用
     let child_ctx = ctx.child().with_timeout(Duration::from_secs(5));
-    
+
     // 调用下游服务
     let result = call_downstream(&child_ctx).await?;
-    
+
     Ok(Response::new(MyResponse { result }))
 }
 ```
@@ -251,33 +251,33 @@ impl MessageService {
     ) -> Result<String> {
         // 检查取消状态
         ctx.ensure_not_cancelled()?;
-        
+
         // 获取数据库连接（优先从 Context 获取，否则使用默认）
         let pool = ctx.get_data::<Arc<PgPool>>()
             .unwrap_or(&self.db_pool);
-        
+
         // 获取租户上下文
         let tenant = ctx.tenant()
             .ok_or_else(|| anyhow::anyhow!("tenant context required"))?;
-        
+
         // 创建子 Context 用于路由（5秒超时）
         let route_ctx = ctx.child().with_timeout(Duration::from_secs(5));
-        
+
         // 路由消息
         let gateway = self.route_message(&route_ctx, conversation_id).await?;
-        
+
         // 创建子 Context 用于发送（10秒超时）
         let send_ctx = ctx.child().with_timeout(Duration::from_secs(10));
-        
+
         // 发送到网关
         let message_id = self.send_to_gateway(&send_ctx, &gateway, content).await?;
-        
+
         Ok(message_id)
     }
-    
+
     async fn route_message(&self, ctx: &Context, conversation_id: &str) -> Result<String> {
         ctx.check_cancelled()?;
-        
+
         tokio::select! {
             result = async {
                 // 模拟路由查找
@@ -289,7 +289,7 @@ impl MessageService {
             }
         }
     }
-    
+
     async fn send_to_gateway(
         &self,
         ctx: &Context,
@@ -297,7 +297,7 @@ impl MessageService {
         content: &str,
     ) -> Result<String> {
         ctx.check_cancelled()?;
-        
+
         tokio::select! {
             result = async {
                 // 模拟网络请求
@@ -324,7 +324,7 @@ async fn main() -> Result<()> {
     let parent = Context::with_request_id("req-001");
     let child1 = parent.child();
     let child2 = parent.child();
-    
+
     // 启动子任务
     let task1 = tokio::spawn(async move {
         loop {
@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
             sleep(Duration::from_millis(10)).await;
         }
     });
-    
+
     let task2 = tokio::spawn(async move {
         loop {
             if child2.is_cancelled() {
@@ -345,17 +345,17 @@ async fn main() -> Result<()> {
             sleep(Duration::from_millis(10)).await;
         }
     });
-    
+
     // 等待一小段时间
     sleep(Duration::from_millis(50)).await;
-    
+
     // 取消父 Context
     println!("Cancelling parent context...");
     parent.cancel();
-    
+
     // 等待子任务完成
     let _ = tokio::try_join!(task1, task2)?;
-    
+
     Ok(())
 }
 ```
