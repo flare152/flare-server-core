@@ -77,7 +77,7 @@ hmac = "0.12"
 sha2 = "0.10"
 
 # ===== 消息队列 =====
-async-nats = { version = "0.42" }
+async-nats = { version = "0.50" }
 rdkafka = { version = "0.36", features = ["cmake-build"] }
 
 # ===== 指标 =====

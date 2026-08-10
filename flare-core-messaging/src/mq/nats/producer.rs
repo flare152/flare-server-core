@@ -128,7 +128,8 @@ impl Producer for NatsProducer {
             ))
         })?;
 
-        let mut publish = jetstream::context::Publish::build().payload(payload.into());
+        // async-nats 0.50 起 jetstream::context::Publish 已弃用，改用 message::PublishMessage
+        let mut publish = jetstream::message::PublishMessage::build().payload(payload.into());
 
         // 添加消息 ID。优先使用业务传入的幂等 ID，保证 JetStream 去重跨重试稳定。
         let message_id = headers
