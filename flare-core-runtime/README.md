@@ -3,7 +3,7 @@
 English · [中文](README.zh-CN.md)
 
 [![Rust](https://img.shields.io/badge/rust-1.94.0%2B-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 
 A **powerful, stable, and general-purpose** Rust runtime framework for high-performance IM servers supporting 1 billion+ online users.
 
@@ -312,7 +312,7 @@ Contributions are welcome! See [CONTRIBUTING.md](../CONTRIBUTING.md) for details
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](../LICENSE) file for details.
 
 ## Acknowledgments
 

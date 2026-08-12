@@ -3,7 +3,7 @@
 [English](README.md) · 中文
 
 [![Rust](https://img.shields.io/badge/rust-1.94.0%2B-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../LICENSE)
 
 **强大、稳定、通用**的 Rust 运行时框架，支持 10 亿+ 在线用户的高性能 IM 服务端。
 
@@ -312,7 +312,7 @@ let runtime = ServiceRuntime::new("my-service")
 
 ## 许可证
 
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+本项目采用 MIT 许可证 - 查看 [LICENSE](../LICENSE) 文件了解详情。
 
 ## 致谢
 
