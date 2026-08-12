@@ -1,0 +1,18 @@
+# cargo-audit 的豁免清单（cargo-deny 读的是 deny.toml，两处都要写）。
+#
+# 只放「查证过确实不影响本项目」的条目，并写清理由与撤销条件。
+# 长期红着的审计等于没有审计——基线必须是绿的，红了才有人看。
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 rsa: Marvin Attack（5.9 medium，上游至今无修复版本）
+    #
+    # **本仓根本不编译 rsa**。它出现在 Cargo.lock 里，是因为 Cargo 会把
+    # 未启用的可选依赖也记进 lock：sqlx 声明了 sqlx-mysql，而 sqlx-mysql 依赖 rsa
+    # （MySQL 的密码交换用）。本项目只开 postgres feature，
+    # `cargo tree -i rsa --all-features --target all` 查无此包即为证。
+    # cargo-audit 只读 lock、不做 feature 求解，所以无法自行判断——只能在此豁免。
+    #
+    # 撤销条件：本仓一旦启用 sqlx 的 mysql feature，或引入任何真实的 RSA 用法。
+    "RUSTSEC-2023-0071",
+]
