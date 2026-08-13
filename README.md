@@ -2,6 +2,21 @@
 
 English · [中文](README.zh-CN.md)
 
+> ## ⚠ Clone this next to its sibling repos
+
+This crate depends on `flare-proto` by **path**, at `../flare-proto`. Cloning this
+repository on its own does not build — `cargo metadata` fails before it reaches your
+code, with an error naming an internal workspace member that tells you nothing about
+the real cause.
+
+```bash
+mkdir flare && cd flare
+git clone https://github.com/flare-im/flare-proto.git
+git clone https://github.com/flare152/flare-server-core.git
+cd flare-server-core && cargo check
+```
+
+
 > ## ℹ 这是通信基础设施，不是开箱即用的 IM 产品
 >
 > 说在前面，免得你 clone 完才发现登不上去：**开源部分不含账号体系**

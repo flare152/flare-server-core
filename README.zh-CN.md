@@ -2,6 +2,20 @@
 
 [English](README.md) · 中文
 
+> ## ⚠ 请与同级仓库一起 clone
+
+本 crate 通过**路径依赖**引用 `../flare-proto`。单独 clone 这一个仓是编译不过的——
+`cargo metadata` 在读到你的代码之前就会失败，而报错指向一个内部工作区成员，
+完全看不出真正的原因。
+
+```bash
+mkdir flare && cd flare
+git clone https://github.com/flare-im/flare-proto.git
+git clone https://github.com/flare152/flare-server-core.git
+cd flare-server-core && cargo check
+```
+
+
 > ## ℹ 这是通信基础设施，不是开箱即用的 IM 产品
 >
 > 说在前面，免得你 clone 完才发现登不上去：**开源部分不含账号体系**
