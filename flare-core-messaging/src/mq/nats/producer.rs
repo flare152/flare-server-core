@@ -269,6 +269,10 @@ async fn ensure_stream(
         subjects,
         retention: jetstream::stream::RetentionPolicy::Limits,
         max_age: spec.max_age,
+        max_bytes: spec.max_bytes,
+        // 满配额时丢最旧的（已消费的历史），而不是拒绝新 publish。
+        // 默认的 DiscardPolicy::New 会把「流写满」升级成「全站发不出消息」。
+        discard: jetstream::stream::DiscardPolicy::Old,
         storage: jetstream::stream::StorageType::File,
         num_replicas: spec.num_replicas,
         duplicate_window: spec.duplicate_window,

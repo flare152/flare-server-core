@@ -47,8 +47,18 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # nats 不在默认 feature 里，上面这行一行 NATS 代码都编不到。
+      - name: clippy（nats 后端）
+        run: cargo clippy --workspace --all-targets --features flare-core-messaging/nats -- -D warnings
+
       - name: test
         run: cargo test --workspace
+
+      # NATS 是生产实际使用的 MQ 后端，但它在默认 feature 之外，
+      # `cargo test --workspace` 从来没有编译过它——JetStream stream 配置里
+      # 缺 max_bytes 这种会导致全站发消息中断的缺陷因此可以一路进生产。
+      - name: test（nats 后端）
+        run: cargo test --workspace --features flare-core-messaging/nats
 
   # 供应链审计与主流程解耦：advisory DB 每天在变，
   # 不该因为上游新披露的 CVE 就让无关的功能 PR 变红。

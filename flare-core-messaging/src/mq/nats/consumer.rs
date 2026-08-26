@@ -114,6 +114,10 @@ impl NatsMessageFetcher {
             subjects: stream_spec.subjects.clone(),
             retention: jetstream::stream::RetentionPolicy::Limits,
             max_age: stream_spec.max_age,
+            max_bytes: stream_spec.max_bytes,
+            // 满配额时丢最旧的（已消费的历史），而不是拒绝新 publish。
+            // 默认的 DiscardPolicy::New 会把「流写满」升级成「全站发不出消息」。
+            discard: jetstream::stream::DiscardPolicy::Old,
             storage: jetstream::stream::StorageType::File,
             num_replicas: stream_spec.num_replicas,
             duplicate_window: stream_spec.duplicate_window,
@@ -554,10 +558,10 @@ impl NatsMessageFetcher {
             // Attributes（前缀匹配）
             let prefix = "x-actor-attr-";
             for (key, value) in headers.iter() {
-                if let Some(attr_key) = key.strip_prefix(prefix) {
-                    if !value.is_empty() {
-                        actor = actor.with_attribute(attr_key, value);
-                    }
+                if let Some(attr_key) = key.strip_prefix(prefix)
+                    && !value.is_empty()
+                {
+                    actor = actor.with_attribute(attr_key, value);
                 }
             }
 

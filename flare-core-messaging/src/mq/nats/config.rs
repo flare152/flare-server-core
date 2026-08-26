@@ -13,6 +13,13 @@ pub struct NatsStreamSpec {
     pub duplicate_window: Duration,
     /// JetStream 集群副本数。单机开发环境保持 1，生产建议使用 3。
     pub num_replicas: usize,
+    /// 单个 stream 的落盘上限（字节）。
+    ///
+    /// 必须有：`RetentionPolicy::Limits` 下只按 `max_age` 淘汰，一个高流量 stream 会一路吃到
+    /// 服务端 `max_file_store` 配额上限，之后**所有 publish** 返回
+    /// `insufficient resources (10023)`。对 IM 来说这等于全站发消息中断，且没有告警。
+    /// 配合 `DiscardPolicy::Old` 使用：满了丢最旧的（基本都是已被消费的），而不是拒绝新消息。
+    pub max_bytes: i64,
 }
 
 impl NatsStreamSpec {
@@ -23,6 +30,7 @@ impl NatsStreamSpec {
             max_age: Duration::from_secs(7 * 24 * 3600),
             duplicate_window: Duration::from_secs(10 * 60),
             num_replicas: 1,
+            max_bytes: DEFAULT_STREAM_MAX_BYTES,
         }
     }
 
@@ -36,11 +44,20 @@ impl NatsStreamSpec {
         self
     }
 
+    pub fn with_max_bytes(mut self, max_bytes: i64) -> Self {
+        self.max_bytes = max_bytes;
+        self
+    }
+
     pub fn with_num_replicas(mut self, num_replicas: usize) -> Self {
         self.num_replicas = num_replicas.clamp(1, 5);
         self
     }
 }
+
+/// 单 stream 默认落盘上限 2 GiB。三条默认流合计 6 GiB，低于部署默认的
+/// `NATS_MAX_FILE_STORE=10GB`，留出余量给去重窗口与索引。
+pub const DEFAULT_STREAM_MAX_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 
 pub const STREAM_FLARE_MESSAGE: &str = "FLARE_MESSAGE";
 pub const STREAM_FLARE_PUSH: &str = "FLARE_PUSH";
@@ -175,7 +192,35 @@ pub trait NatsConsumerConfig: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::subject_matches;
+    use super::{default_stream_specs, subject_matches};
+
+    /// 每条默认流都必须有字节上限。
+    ///
+    /// 没有上限时 stream 会一路吃满服务端 `max_file_store` 配额，之后所有 publish 返回
+    /// `insufficient resources (10023)`——线上表现是消息一直转圈发不出去，日志里没有任何
+    /// ERROR 级信号。这个断言是唯一能提前发现的地方。
+    #[test]
+    fn every_default_stream_has_a_byte_cap() {
+        for spec in default_stream_specs() {
+            assert!(
+                spec.max_bytes > 0,
+                "stream {} 没有 max_bytes，写满后会让全站发消息中断",
+                spec.name
+            );
+        }
+    }
+
+    /// 所有默认流的上限之和必须留在部署默认配额（NATS_MAX_FILE_STORE=10GB）之内，
+    /// 否则单条流仍能把整个 JetStream 存储吃穿，`DiscardPolicy::Old` 也救不了别的流。
+    #[test]
+    fn default_stream_caps_fit_in_deploy_file_store() {
+        const DEPLOY_MAX_FILE_STORE: i64 = 10 * 1024 * 1024 * 1024;
+        let total: i64 = default_stream_specs().iter().map(|s| s.max_bytes).sum();
+        assert!(
+            total < DEPLOY_MAX_FILE_STORE,
+            "默认流上限合计 {total} 字节，超过部署配额 {DEPLOY_MAX_FILE_STORE}"
+        );
+    }
 
     #[test]
     fn matches_nats_single_token_wildcard() {
