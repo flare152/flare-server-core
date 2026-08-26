@@ -362,17 +362,31 @@ impl DiscoveryBackend for ConsulBackend {
             tags.push(format!("namespace={}", namespace));
         }
 
-        // 处理地址：将 0.0.0.0 转换为 127.0.0.1，因为 Consul 无法访问 0.0.0.0
+        // 处理地址：注册进 Consul 的必须是**别人能连上的**地址，不是绑定地址。
+        //
+        // 绑 0.0.0.0 时以前一律登记成 127.0.0.1。单机部署没问题（大家都在同一台），
+        // 但**容器里每个 127.0.0.1 都是各自的 loopback**：服务注册成功、健康检查也过，
+        // 而任何跨服务调用都会 `tcp connect error`——注册表看着完全正常，
+        // 排查时很难想到问题出在登记的地址上。
+        //
+        // 所以给一个显式的对外地址入口：容器编排里把它设成服务名（compose 网络的
+        // DNS 能解析），不设时保持原行为，单机部署不受影响。
         let service_ip = instance.address.ip();
-        let service_address = if service_ip.is_unspecified() {
-            // 0.0.0.0 或 :: 转换为 127.0.0.1 或 ::1
-            if service_ip.is_ipv4() {
-                "127.0.0.1".to_string()
-            } else {
-                "::1".to_string()
+        let advertise_host = std::env::var("SERVICE_ADVERTISE_HOST")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let service_address = match advertise_host {
+            Some(host) => host,
+            None if service_ip.is_unspecified() => {
+                // 0.0.0.0 或 :: 转换为 127.0.0.1 或 ::1
+                if service_ip.is_ipv4() {
+                    "127.0.0.1".to_string()
+                } else {
+                    "::1".to_string()
+                }
             }
-        } else {
-            service_ip.to_string()
+            None => service_ip.to_string(),
         };
 
         // 构建健康检查配置
