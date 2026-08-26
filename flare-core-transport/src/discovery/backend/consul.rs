@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use reqwest::Client as HttpClient;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -613,9 +614,31 @@ impl ConsulBackend {
                 .and_then(|v| v.as_u64())
                 .ok_or("Missing port")?;
 
-            let socket_addr = format!("{}:{}", address, port)
-                .parse()
-                .map_err(|e| format!("Invalid address: {}", e))?;
+            // 注册进 Consul 的地址**可能是主机名**（容器编排里就是服务名），
+            // 而 `SocketAddr::parse` 只认 IP 字面量。以前直接 parse，遇到主机名会
+            // 整个发现调用失败（`?` 会中断整批实例），调用方于是退到静态兜底 ——
+            // 表现是「服务明明注册着，却发现不到」。
+            //
+            // 所以先按 IP 解析，失败再走一次 DNS。IP 字面量的路径一字不变。
+            let endpoint = format!("{}:{}", address, port);
+            let socket_addr = match endpoint.parse::<SocketAddr>() {
+                Ok(addr) => addr,
+                Err(_) => match tokio::net::lookup_host(&endpoint).await {
+                    Ok(mut addrs) => addrs.next().ok_or_else(|| {
+                        format!("Invalid address: {endpoint} resolved to nothing")
+                    })?,
+                    Err(e) => {
+                        // 单个实例解析不了不该拖垮整批：跳过它，其余照常返回。
+                        tracing::warn!(
+                            service_type = %service_type,
+                            endpoint = %endpoint,
+                            error = %e,
+                            "skip instance: address is neither an IP nor resolvable"
+                        );
+                        continue;
+                    }
+                },
+            };
 
             let default_id = format!("{}-{}", service_type, address);
             let instance_id = service
