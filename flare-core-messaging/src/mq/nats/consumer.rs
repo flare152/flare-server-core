@@ -149,6 +149,12 @@ impl NatsMessageFetcher {
                 jetstream::consumer::AckPolicy::None
             },
             filter_subjects: subjects.clone(),
+            // 只对**新建**的 durable 生效：已存在的 durable 由服务端保留原有游标。
+            deliver_policy: if config.deliver_from_new() {
+                jetstream::consumer::DeliverPolicy::New
+            } else {
+                jetstream::consumer::DeliverPolicy::All
+            },
             ack_wait: std::time::Duration::from_secs(config.ack_wait_secs().max(1)),
             max_deliver: config.max_deliver().max(1),
             max_ack_pending: config.max_ack_pending().max(1),

@@ -184,6 +184,17 @@ pub trait NatsConsumerConfig: Send + Sync {
     /// 是否启用持久化
     fn enable_durable(&self) -> bool;
 
+    /// 新建的 durable 是否从"此刻之后"开始投递，而不是重放整条流的历史。
+    ///
+    /// 默认 false（JetStream 的 DeliverAll），保持"不丢消息"的语义。
+    /// 但 durable 名字里含订阅的 subject 列表：给一个已上线的消费者**加 subject**
+    /// 会生成一个全新的 durable，于是它会把流里几十万条历史全部重放一遍。
+    /// 当消费副作用不幂等（例如未读计数自增）时，这会直接把数据写坏。
+    /// 这类"只关心新增量"的消费者应当返回 true。
+    fn deliver_from_new(&self) -> bool {
+        false
+    }
+
     /// All streams this consumer may subscribe to.
     fn stream_specs(&self) -> Vec<NatsStreamSpec> {
         default_stream_specs()
