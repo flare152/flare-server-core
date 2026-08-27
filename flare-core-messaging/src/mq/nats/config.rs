@@ -159,6 +159,30 @@ pub trait NatsProducerConfig: Send + Sync {
 }
 
 /// NATS JetStream 消费者配置 Trait
+/// JetStream 的资源不足报错（存储 10047 / 一般资源 10023）翻译成能直接行动的信息。
+///
+/// 原始报错只有一句 `insufficient (storage) resources`，既不说是账户配额不够还是磁盘满了，
+/// 也不会提 `max_bytes` 是**预留额**——JetStream 按上限把额度记在账户头上，不是用多少算多少。
+/// 线上遇到过两次：一次是流写满导致**全站发消息静默中断**，一次是预留超配把 push-server
+/// 打进崩溃循环。两次都因为报错毫无指向性而绕了远路。
+///
+/// 不是资源类错误时返回 `None`，调用方原样处理。
+pub fn explain_jetstream_resource_error(what: &str, raw: &str) -> Option<String> {
+    let low = raw.to_lowercase();
+    if !low.contains("insufficient") && !raw.contains("10047") && !raw.contains("10023") {
+        return None;
+    }
+    Some(format!(
+        "{what} 失败：JetStream 资源不足（原始报错：{raw}）。\n\
+         排查顺序：\n\
+         1) 所有 stream 的 max_bytes **之和**是否小于服务端 jetstream.max_file_store\n\
+            （部署里由 NATS_MAX_FILE_STORE 控制）——max_bytes 是按上限预留，不是按用量；\n\
+         2) 该配额是否放得进宿主机剩余磁盘；\n\
+         3) 流是否已写满且 discard 策略不是 Old（满了会拒绝新消息而不是丢旧的）。\n\
+         注意这类失败**不会自愈**，重试只是延后暴露。"
+    ))
+}
+
 pub trait NatsConsumerConfig: Send + Sync {
     /// NATS 服务器 URL
     fn nats_url(&self) -> &str;
@@ -212,7 +236,7 @@ pub trait NatsConsumerConfig: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_stream_specs, subject_matches};
+    use super::{default_stream_specs, explain_jetstream_resource_error, subject_matches};
 
     /// 每条默认流都必须有字节上限。
     ///
@@ -236,6 +260,32 @@ mod tests {
     /// 但运维把 `NATS_MAX_FILE_STORE` 调到 6GB 后，最后建的那条流直接建不出来，
     /// push-server 进崩溃循环（线上实测）。`max_bytes` 是**预留额**、按上限计入账户配额，
     /// 不是"用多少算多少"——所以这里必须按保守下限卡。
+    /// JetStream 那句 `insufficient resources` 必须被翻译成能直接行动的信息。
+    /// 线上两次事故（全站发消息静默中断 / push-server 崩溃循环）都是因为
+    /// 原始报错既不说配额也不说磁盘，更不提 max_bytes 是预留额。
+    #[test]
+    fn resource_errors_are_explained_not_passed_through() {
+        for raw in [
+            "insufficient resources (code 503, error code 10023)",
+            "jetstream error: insufficient storage resources available (code 500, error code 10047)",
+        ] {
+            let msg =
+                explain_jetstream_resource_error("测试上下文", raw).expect("资源类报错必须被翻译");
+            assert!(msg.contains("测试上下文"), "要带上出错的上下文");
+            assert!(msg.contains(raw), "原始报错不能丢");
+            assert!(msg.contains("max_bytes"), "要点明 max_bytes 是预留额");
+            assert!(msg.contains("max_file_store"), "要指向该对照的配额项");
+            assert!(msg.contains("不会自愈"), "要说明重试没用");
+        }
+    }
+
+    /// 非资源类报错原样透传，不能被这层包装吃掉。
+    #[test]
+    fn non_resource_errors_pass_through_untouched() {
+        assert!(explain_jetstream_resource_error("ctx", "connection refused").is_none());
+        assert!(explain_jetstream_resource_error("ctx", "timeout").is_none());
+    }
+
     #[test]
     fn default_stream_caps_fit_in_conservative_file_store() {
         // 单机小规格部署给 JetStream 的常见下限。

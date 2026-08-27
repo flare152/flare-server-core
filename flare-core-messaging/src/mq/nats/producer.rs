@@ -20,6 +20,15 @@ pub struct NatsProducer {
     retry_backoff: Duration,
 }
 
+/// JetStream 资源耗尽时立刻失败，别重试。
+///
+/// 这类错误**不会自愈**：流写满或账户配额超配，重试 8 次只是把暴露时间往后拖，
+/// 顺带刷出一堆 WARN 把真正的原因埋掉。线上出现过一次「全站发消息静默中断」，
+/// 日志里全是重试 WARN，没有一条说得清是配额问题。
+fn resource_exhausted(raw: &str) -> Option<String> {
+    super::config::explain_jetstream_resource_error("NATS publish", raw)
+}
+
 impl NatsProducer {
     /// 创建新的 NATS JetStream 生产者
     pub async fn new<C>(config: &C) -> Result<Self, ProducerError>
@@ -176,6 +185,9 @@ impl Producer for NatsProducer {
                 Ok(pending_ack) => match pending_ack.await {
                     Ok(ack) => break ack,
                     Err(err) => {
+                        if let Some(msg) = resource_exhausted(&err.to_string()) {
+                            return Err(ProducerError::Send(msg));
+                        }
                         if attempt >= self.retries {
                             return Err(ProducerError::Send(err.to_string()));
                         }
@@ -191,6 +203,9 @@ impl Producer for NatsProducer {
                     }
                 },
                 Err(err) => {
+                    if let Some(msg) = resource_exhausted(&err.to_string()) {
+                        return Err(ProducerError::Send(msg));
+                    }
                     if attempt >= self.retries {
                         return Err(ProducerError::Send(err.to_string()));
                     }
