@@ -124,10 +124,13 @@ impl NatsMessageFetcher {
             ..Default::default()
         };
 
-        context
-            .create_or_update_stream(stream)
-            .await
-            .map_err(|e| ConsumerError::Configuration(e.to_string()))?;
+        context.create_or_update_stream(stream).await.map_err(|e| {
+            ConsumerError::Configuration(explain_stream_error(
+                &stream_name,
+                stream_spec.max_bytes,
+                &e.to_string(),
+            ))
+        })?;
 
         // 创建 consumer
         let consumer_name = if config.enable_durable() {
@@ -386,6 +389,26 @@ fn sanitize_task_part(value: &str) -> String {
             }
         })
         .collect()
+}
+
+/// 把 JetStream 的存储配额报错翻译成能直接行动的信息。
+///
+/// 原始报错只有一句 `insufficient storage resources (code 500, error code 10047)`，
+/// 完全不说是"账户配额不够"还是"磁盘满了"，更不会提 `max_bytes` 是**预留额**：
+/// JetStream 按上限把额度记在账户头上，不是用多少算多少。线上遇到时表现为
+/// 某个服务反复崩溃重启，而其它服务一切正常——极难指向真因。
+fn explain_stream_error(stream_name: &str, max_bytes: i64, raw: &str) -> String {
+    if !raw.contains("10047") && !raw.to_lowercase().contains("insufficient storage") {
+        return raw.to_string();
+    }
+    format!(
+        "创建/更新 stream {stream_name} 失败：JetStream 存储配额不足（原始报错：{raw}）。\n\
+         注意 max_bytes 是**预留额**，按上限计入账户的 max_file_store，不是按实际用量。\n\
+         本条流申请 {} MiB。请对照：所有 stream 的 max_bytes 之和 必须小于 \n\
+         服务端 jetstream.max_file_store（部署里由 NATS_MAX_FILE_STORE 控制），\n\
+         并且该配额还要放得进宿主机剩余磁盘。",
+        max_bytes / (1024 * 1024)
+    )
 }
 
 fn durable_consumer_name(group: &str, stream_name: &str, subjects: &[String]) -> String {

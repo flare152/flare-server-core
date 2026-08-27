@@ -55,9 +55,18 @@ impl NatsStreamSpec {
     }
 }
 
-/// 单 stream 默认落盘上限 2 GiB。三条默认流合计 6 GiB，低于部署默认的
-/// `NATS_MAX_FILE_STORE=10GB`，留出余量给去重窗口与索引。
-pub const DEFAULT_STREAM_MAX_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+/// 单 stream 默认落盘上限 1 GiB。
+///
+/// ⚠️ JetStream 把 `max_bytes` 当作**预留额**计入账户的 `max_file_store`——
+/// 不是"用多少算多少"。所以这个默认值 × 流条数必须**严格小于**部署配额，
+/// 否则最后建的那条流会直接失败，报的还是一句毫无指向性的
+/// `insufficient storage resources (code 500, error code 10047)`，
+/// 而对应的服务会进崩溃循环。
+///
+/// 这里定 1 GiB：三条默认流合计 3 GiB，在 4GB 起的部署配额下都还有余量。
+/// 之前定 2 GiB（合计 6 GiB）只在 `NATS_MAX_FILE_STORE=10GB` 的默认部署下成立，
+/// 一旦运维把配额调低（实测 6GB）就会把 push-server 打进崩溃循环。
+pub const DEFAULT_STREAM_MAX_BYTES: i64 = 1024 * 1024 * 1024;
 
 pub const STREAM_FLARE_MESSAGE: &str = "FLARE_MESSAGE";
 pub const STREAM_FLARE_PUSH: &str = "FLARE_PUSH";
@@ -221,15 +230,21 @@ mod tests {
         }
     }
 
-    /// 所有默认流的上限之和必须留在部署默认配额（NATS_MAX_FILE_STORE=10GB）之内，
-    /// 否则单条流仍能把整个 JetStream 存储吃穿，`DiscardPolicy::Old` 也救不了别的流。
+    /// 所有默认流的上限之和必须留在**运维可能设置的最小配额**之内。
+    ///
+    /// 判据一度对着仓库默认的 10GB 检查，于是 6 GiB 的合计轻松通过；
+    /// 但运维把 `NATS_MAX_FILE_STORE` 调到 6GB 后，最后建的那条流直接建不出来，
+    /// push-server 进崩溃循环（线上实测）。`max_bytes` 是**预留额**、按上限计入账户配额，
+    /// 不是"用多少算多少"——所以这里必须按保守下限卡。
     #[test]
-    fn default_stream_caps_fit_in_deploy_file_store() {
-        const DEPLOY_MAX_FILE_STORE: i64 = 10 * 1024 * 1024 * 1024;
+    fn default_stream_caps_fit_in_conservative_file_store() {
+        // 单机小规格部署给 JetStream 的常见下限。
+        const CONSERVATIVE_MAX_FILE_STORE: i64 = 4 * 1024 * 1024 * 1024;
         let total: i64 = default_stream_specs().iter().map(|s| s.max_bytes).sum();
         assert!(
-            total < DEPLOY_MAX_FILE_STORE,
-            "默认流上限合计 {total} 字节，超过部署配额 {DEPLOY_MAX_FILE_STORE}"
+            total < CONSERVATIVE_MAX_FILE_STORE,
+            "默认流上限合计 {total} 字节，超过保守配额 {CONSERVATIVE_MAX_FILE_STORE}；\
+             JetStream 按上限预留，超了会让最后建的那条流直接失败"
         );
     }
 
