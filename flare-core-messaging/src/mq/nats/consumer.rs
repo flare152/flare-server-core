@@ -145,6 +145,7 @@ impl NatsMessageFetcher {
             "ephemeral_consumer".to_string()
         };
 
+        let consumer_name_for_prune = consumer_name.clone();
         let consumer_config = PullConfig {
             name: Some(consumer_name.clone()),
             durable_name: if config.enable_durable() {
@@ -177,6 +178,24 @@ impl NatsMessageFetcher {
             .await
             .map_err(|e| ConsumerError::Configuration(e.to_string()))?;
 
+        // durable 名字里含订阅 subject 列表的哈希：给消费组**加一条 subject**
+        // 就会生成全新的 durable，而旧的那个仍留在服务端、再也没人消费。
+        // JetStream 会一直为它保留消息，积压只增不减——流因此永远无法老化，
+        // 最终撑爆存储配额（本仓出过一次 publish 全 503 的故障）。
+        // 线上实测就留下过一个卡在 seq 979841、积压 11.9 万条的孤儿。
+        //
+        // 每次订阅成功后顺手清掉**同组同流但名字不同**的陈旧 durable。
+        // 清理是尽力而为：失败只告警，不该拦住服务起来。
+        if config.enable_durable() {
+            Self::prune_stale_durables(
+                &context,
+                &stream_name,
+                config.consumer_group(),
+                &consumer_name_for_prune,
+            )
+            .await;
+        }
+
         // Keep the client pull request within the server-side limits declared above.
         // async-nats::Consumer::messages() defaults to batch=200/expires=30s, which
         // can be rejected when the durable is capped by max_batch/max_expires.
@@ -201,6 +220,59 @@ impl NatsMessageFetcher {
         let fetcher = Self { stream, manual_ack };
 
         Ok(fetcher)
+    }
+
+    /// 清掉同组同流、但名字与当前不同的陈旧 durable。
+    ///
+    /// 名字形如 `consumer_<组>_<流>_<subject哈希>`，"同组同流不同哈希"
+    /// 就是改过 subject 之后遗留的旧 durable：不会再被消费，
+    /// 却让 JetStream 一直保留消息、积压只增不减。
+    ///
+    /// 只按前缀 `consumer_<组>_<流>_` 匹配，不会误伤别的消费组。
+    async fn prune_stale_durables(
+        context: &jetstream::Context,
+        stream_name: &str,
+        group: &str,
+        keep: &str,
+    ) {
+        use futures::StreamExt as _;
+
+        let prefix = format!(
+            "consumer_{}_{}_",
+            sanitize_task_part(group),
+            sanitize_task_part(stream_name)
+        );
+        let Ok(stream) = context.get_stream(stream_name).await else {
+            tracing::warn!(stream = %stream_name, "清理陈旧 durable：取不到流，跳过");
+            return;
+        };
+        let mut names = stream.consumer_names();
+        let mut stale = Vec::new();
+        while let Some(item) = names.next().await {
+            match item {
+                Ok(name) if name.starts_with(&prefix) && name != keep => stale.push(name),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(stream = %stream_name, error = %e, "清理陈旧 durable：列举失败，跳过");
+                    return;
+                }
+            }
+        }
+        for name in stale {
+            match stream.delete_consumer(&name).await {
+                Ok(_) => tracing::info!(
+                    stream = %stream_name,
+                    consumer_group = %group,
+                    removed = %name,
+                    kept = %keep,
+                    "清掉改 subject 后遗留的陈旧 durable"
+                ),
+                Err(e) => tracing::warn!(
+                    stream = %stream_name, consumer = %name, error = %e,
+                    "清理陈旧 durable：删除失败（不影响启动）"
+                ),
+            }
+        }
     }
 }
 
@@ -764,6 +836,52 @@ impl Default for NatsConsumerBuilder {
 
 #[cfg(test)]
 mod tests {
+    use super::{durable_consumer_name, sanitize_task_part};
+
+    /// 陈旧 durable 的识别只能靠 `consumer_<组>_<流>_` 前缀，
+    /// 而且必须**只**匹配同组同流——误删别的消费组的 durable
+    /// 会让那个组从头重放整个流，比留着孤儿严重得多。
+    #[test]
+    fn stale_durable_prefix_matches_same_group_and_stream_only() {
+        let mine = durable_consumer_name(
+            "conversation-read-receipt",
+            "FLARE_MESSAGE",
+            &["flare.im.message.events".to_string()],
+        );
+        let after_adding_subject = durable_consumer_name(
+            "conversation-read-receipt",
+            "FLARE_MESSAGE",
+            &[
+                "flare.im.message.events".to_string(),
+                "flare.im.message.storage".to_string(),
+            ],
+        );
+        let other_group = durable_consumer_name(
+            "storage-writer",
+            "FLARE_MESSAGE",
+            &["flare.im.message.events".to_string()],
+        );
+        let other_stream = durable_consumer_name(
+            "conversation-read-receipt",
+            "FLARE_PUSH",
+            &["flare.im.message.events".to_string()],
+        );
+
+        let prefix = format!(
+            "consumer_{}_{}_",
+            sanitize_task_part("conversation-read-receipt"),
+            sanitize_task_part("FLARE_MESSAGE")
+        );
+
+        // 加了 subject 就换名字——这正是孤儿的来源
+        assert_ne!(mine, after_adding_subject, "改 subject 必须产生新 durable");
+        // 同组同流的旧 durable 要被认出来
+        assert!(mine.starts_with(&prefix));
+        assert!(after_adding_subject.starts_with(&prefix));
+        // 别的组、别的流一律不许碰
+        assert!(!other_group.starts_with(&prefix), "不能误伤别的消费组");
+        assert!(!other_stream.starts_with(&prefix), "不能误伤别的流");
+    }
     use super::delivery_attempt_retry_count;
 
     #[test]
