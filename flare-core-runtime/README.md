@@ -308,7 +308,7 @@ Run `cargo doc --open` to view the complete API documentation.
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](../CONTRIBUTING.md) for details.
+Contributions are welcome! See [CONTRIBUTING.md](../.github/CONTRIBUTING.md) for details.
 
 ## License
 

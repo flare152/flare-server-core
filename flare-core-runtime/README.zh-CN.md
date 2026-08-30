@@ -308,7 +308,7 @@ let runtime = ServiceRuntime::new("my-service")
 
 ## 贡献
 
-欢迎贡献代码！请查看 [CONTRIBUTING.md](../CONTRIBUTING.md) 了解详情。
+欢迎贡献代码！请查看 [CONTRIBUTING.md](../.github/CONTRIBUTING.md) 了解详情。
 
 ## 许可证
 
