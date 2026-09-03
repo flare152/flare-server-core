@@ -42,6 +42,18 @@ pub struct AuthProviderConfig {
     pub hook_secret_header: String,
     #[serde(default)]
     pub hook_secret: Option<String>,
+    /// `http_hook` 模式下签发/刷新转发地址；未配置则签发接口返回 501。
+    #[serde(default)]
+    pub hook_issue_url: Option<String>,
+    /// 联调开关：允许不带 app 凭据、直接按 userId 签发。默认关；开启等于任何人可冒任意身份。
+    #[serde(default)]
+    pub dev_issue: bool,
+    /// 业务后端签发凭据（服务端到服务端）。客户端永远不持有。
+    #[serde(default)]
+    pub app_credentials: Vec<AppCredential>,
+    /// 刷新宽限：token 过期后多久内仍可换新。
+    #[serde(default = "default_refresh_grace_secs")]
+    pub refresh_grace_secs: u64,
 }
 
 impl Default for AuthProviderConfig {
@@ -52,7 +64,40 @@ impl Default for AuthProviderConfig {
             hook_timeout_ms: default_auth_hook_timeout_ms(),
             hook_secret_header: default_auth_hook_secret_header(),
             hook_secret: None,
+            hook_issue_url: None,
+            dev_issue: false,
+            app_credentials: Vec::new(),
+            refresh_grace_secs: default_refresh_grace_secs(),
         }
+    }
+}
+
+fn default_refresh_grace_secs() -> u64 {
+    7 * 24 * 3600
+}
+
+/// 业务后端调用签发接口的凭据：`x-app-id` + `x-app-secret`。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AppCredential {
+    pub app_id: String,
+    pub secret: String,
+}
+
+impl AppCredential {
+    /// 解析 `app1:secret1,app2:secret2` 形式的环境变量。
+    pub fn parse_list(value: &str) -> Result<Vec<Self>> {
+        let mut out = Vec::new();
+        for item in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let Some((app_id, secret)) = item.split_once(':') else {
+                anyhow::bail!("app credential `{item}` must be `app_id:secret`");
+            };
+            let (app_id, secret) = (app_id.trim(), secret.trim());
+            if app_id.is_empty() || secret.len() < 16 {
+                anyhow::bail!("app credential `{app_id}` needs a non-empty app_id and a secret of at least 16 bytes");
+            }
+            out.push(Self { app_id: app_id.to_string(), secret: secret.to_string() });
+        }
+        Ok(out)
     }
 }
 
