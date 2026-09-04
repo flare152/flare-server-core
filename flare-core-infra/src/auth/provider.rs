@@ -268,13 +268,71 @@ impl HookValidationResponse {
     }
 }
 
+/// 分层校验器：按顺序尝试每一层，第一层通过即返回。
+///
+/// 典型编排 = [本地(core JWT + 受信 issuer), 三方验证 hook]：core 自签 / 受信 issuer 的
+/// token 走本地零网络开销；本地都不认的（三方 opaque token）才回落到 hook 询问业务方。
+/// 这样一套部署**既能 core 独立完成验证，又能适配三方业务的 token 验证**。
+///
+/// 错误合并策略：
+/// - 某层 `Forbidden`/`MissingToken`：立即返回（身份已识别但不允许 / 压根没 token，无需再试）。
+/// - 某层 `InvalidToken`：这层不认这枚 token，继续下一层。
+/// - 某层 `ProviderUnavailable`：这层（多为 hook）暂时不可用，记下后继续下一层。
+/// - 全部失败：只要有过 `ProviderUnavailable` 就返回它（可重试，别把「没验成」误判成「非法」把可能合法的三方 token 永久拒掉）；
+///   否则返回最后一次 `InvalidToken`。
+#[derive(Clone)]
+pub struct ChainedTokenValidator {
+    layers: Vec<Arc<dyn TokenValidator>>,
+}
+
+impl ChainedTokenValidator {
+    pub fn new(layers: Vec<Arc<dyn TokenValidator>>) -> Self {
+        Self { layers }
+    }
+}
+
+#[async_trait]
+impl TokenValidator for ChainedTokenValidator {
+    async fn validate(
+        &self,
+        request: TokenValidationRequest,
+    ) -> std::result::Result<AuthenticatedPrincipal, AuthError> {
+        let mut last_invalid: Option<AuthError> = None;
+        let mut had_unavailable: Option<AuthError> = None;
+        for layer in &self.layers {
+            match layer.validate(request.clone()).await {
+                Ok(principal) => return Ok(principal),
+                Err(err @ (AuthError::Forbidden(_) | AuthError::MissingToken)) => return Err(err),
+                Err(err @ AuthError::InvalidToken(_)) => last_invalid = Some(err),
+                Err(err @ AuthError::ProviderUnavailable(_)) => had_unavailable = Some(err),
+            }
+        }
+        Err(had_unavailable
+            .or(last_invalid)
+            .unwrap_or_else(|| AuthError::InvalidToken("no validator accepted the token".to_string())))
+    }
+}
+
 pub fn build_token_validator(
     config: &AuthProviderConfig,
     token_service: Arc<TokenService>,
     trusted_issuers: &[TrustedIssuerConfig],
 ) -> Result<Arc<dyn TokenValidator>> {
     match config.mode {
-        AuthProviderMode::CoreJwt => build_core_jwt_token_validator(token_service, trusted_issuers),
+        // core_jwt：本地校验（core JWT + 受信 issuer）。若同时配了 hook_url，则把三方验证 hook
+        // 作为**兜底层**接在本地之后——本地认得的零网络开销，认不得的才问业务方。
+        // 这就是「既能 core 独立验证，又能适配三方 token 验证」的混合形态。
+        AuthProviderMode::CoreJwt => {
+            let local = build_core_jwt_token_validator(token_service, trusted_issuers)?;
+            match config.hook_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(_) => {
+                    let hook = build_http_hook_token_validator(config)?;
+                    Ok(Arc::new(ChainedTokenValidator::new(vec![local, hook])))
+                }
+                None => Ok(local),
+            }
+        }
+        // http_hook：业务方拥有整套 token 流程，core 只把每枚 token 交给 hook 验证（纯委托）。
         AuthProviderMode::HttpHook => build_http_hook_token_validator(config),
     }
 }
@@ -329,6 +387,82 @@ mod tests {
             principal.metadata.get("source").map(String::as_str),
             Some("business")
         );
+    }
+
+    #[derive(Clone)]
+    struct StubValidator {
+        // token 值 -> 结果（Ok(user_id) / Err）
+        accepts: Option<String>,
+        result: std::sync::Arc<std::sync::Mutex<Option<AuthError>>>,
+    }
+
+    #[async_trait]
+    impl TokenValidator for StubValidator {
+        async fn validate(
+            &self,
+            request: TokenValidationRequest,
+        ) -> std::result::Result<AuthenticatedPrincipal, AuthError> {
+            if let Some(err) = self.result.lock().unwrap().take() {
+                return Err(err);
+            }
+            if self.accepts.as_deref() == Some(request.token.as_str()) {
+                return Ok(AuthenticatedPrincipal {
+                    user_id: format!("u-{}", request.token),
+                    tenant_id: None,
+                    device_id: None,
+                    app_id: None,
+                    expires_at: None,
+                    scopes: Vec::new(),
+                    metadata: HashMap::new(),
+                });
+            }
+            Err(AuthError::InvalidToken("stub: not my token".into()))
+        }
+    }
+
+    fn stub(accepts: &str) -> Arc<dyn TokenValidator> {
+        Arc::new(StubValidator {
+            accepts: Some(accepts.to_string()),
+            result: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    fn req(token: &str) -> TokenValidationRequest {
+        TokenValidationRequest { token: token.into(), trace_id: None, request_id: None, path: None, method: None }
+    }
+
+    #[tokio::test]
+    async fn chained_validates_local_first_then_hook_fallback() {
+        // 层1=本地(认 "core-tok")，层2=hook(认 "3p-tok")
+        let chain = ChainedTokenValidator::new(vec![stub("core-tok"), stub("3p-tok")]);
+        assert_eq!(chain.validate(req("core-tok")).await.unwrap().user_id, "u-core-tok");
+        assert_eq!(chain.validate(req("3p-tok")).await.unwrap().user_id, "u-3p-tok");
+        // 两层都不认 -> InvalidToken
+        assert!(matches!(chain.validate(req("nope")).await.unwrap_err(), AuthError::InvalidToken(_)));
+    }
+
+    #[tokio::test]
+    async fn chained_hook_unavailable_is_retryable_not_permanent_reject() {
+        // 层1 本地不认（InvalidToken），层2 hook 不可用（ProviderUnavailable）：
+        // 合并后应为 ProviderUnavailable（可重试），而不是把可能合法的三方 token 永久拒掉。
+        let local = stub("core-tok");
+        let down = Arc::new(StubValidator {
+            accepts: None,
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(AuthError::ProviderUnavailable("hook down".into())))),
+        });
+        let chain = ChainedTokenValidator::new(vec![local, down]);
+        assert!(matches!(chain.validate(req("3p-tok")).await.unwrap_err(), AuthError::ProviderUnavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn chained_forbidden_short_circuits() {
+        let forbid = Arc::new(StubValidator {
+            accepts: None,
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(AuthError::Forbidden("nope".into())))),
+        });
+        let never = stub("never");
+        let chain = ChainedTokenValidator::new(vec![forbid, never]);
+        assert!(matches!(chain.validate(req("x")).await.unwrap_err(), AuthError::Forbidden(_)));
     }
 
     #[tokio::test]

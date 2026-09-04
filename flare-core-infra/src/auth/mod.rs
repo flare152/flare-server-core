@@ -12,7 +12,7 @@ pub use issuer::{
     build_token_issuer,
 };
 pub use provider::{
-    AppCredential, AuthProviderConfig, AuthProviderMode, CoreJwtTokenValidator, HttpHookTokenValidator,
+    AppCredential, AuthProviderConfig, AuthProviderMode, ChainedTokenValidator, CoreJwtTokenValidator, HttpHookTokenValidator,
     TrustedIssuerConfig, build_core_jwt_token_validator, build_http_hook_token_validator,
     build_token_validator,
 };
