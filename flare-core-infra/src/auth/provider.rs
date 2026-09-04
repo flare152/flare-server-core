@@ -216,6 +216,7 @@ impl TokenValidator for HttpHookTokenValidator {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct HookValidationRequest {
     token: String,
     trace_id: Option<String>,
@@ -225,6 +226,7 @@ struct HookValidationRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct HookValidationResponse {
     active: bool,
     user_id: Option<String>,
@@ -429,6 +431,18 @@ mod tests {
 
     fn req(token: &str) -> TokenValidationRequest {
         TokenValidationRequest { token: token.into(), trace_id: None, request_id: None, path: None, method: None }
+    }
+
+    #[test]
+    fn hook_response_deserializes_camelcase() {
+        // 验证 hook 响应契约与鉴权 API 其余部分一致，走 camelCase。
+        let raw = r#"{"active":true,"userId":"3p-alice","tenantId":"0","expiresAt":123,"scopes":["message:send"],"metadata":{"source":"biz"}}"#;
+        let resp: HookValidationResponse = serde_json::from_str(raw).unwrap();
+        let p = resp.into_principal().unwrap();
+        assert_eq!(p.user_id, "3p-alice");
+        assert_eq!(p.tenant_id.as_deref(), Some("0"));
+        assert_eq!(p.expires_at, Some(123));
+        assert_eq!(p.scopes, vec!["message:send"]);
     }
 
     #[tokio::test]
