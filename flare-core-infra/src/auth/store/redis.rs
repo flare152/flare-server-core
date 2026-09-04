@@ -42,6 +42,11 @@ impl RedisTokenStore {
     fn user_set_key(&self, user_id: &str) -> String {
         format!("{}:token:user:{}", self.namespace, user_id)
     }
+
+    /// 踢人信号的 pubsub 频道。网关订阅同名频道即可跨节点收到撤销即断信号。
+    pub fn kick_channel(&self) -> String {
+        format!("{}:kick", self.namespace)
+    }
 }
 
 impl TokenStore for RedisTokenStore {
@@ -119,5 +124,16 @@ impl TokenStore for RedisTokenStore {
             .exists(self.revoked_key(jti))
             .map_err(|err| anyhow!("failed to check revoked key: {err}"))?;
         Ok(exists)
+    }
+
+    fn publish_kick(&self, user_id: &str) -> Result<()> {
+        let mut conn = self
+            .client
+            .get_connection()
+            .map_err(|err| anyhow!("failed to get redis connection: {err}"))?;
+        // 载荷就是 user_id；网关订阅 kick_channel 后按 user_id 关闭本地该用户的连接。
+        conn.publish::<_, _, ()>(self.kick_channel(), user_id)
+            .map_err(|err| anyhow!("failed to publish kick signal: {err}"))?;
+        Ok(())
     }
 }

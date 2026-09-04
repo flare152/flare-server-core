@@ -19,4 +19,10 @@ pub trait TokenStore: Send + Sync {
 
     /// 检查令牌是否已被撤销
     fn is_revoked(&self, jti: &str) -> Result<bool>;
+
+    /// 发布「踢用户」信号，通知各长连接网关关闭该用户的活连接（撤销即断）。
+    /// 默认无操作；仅 redis 实现走 pubsub。
+    fn publish_kick(&self, _user_id: &str) -> Result<()> {
+        Ok(())
+    }
 }

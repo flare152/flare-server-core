@@ -323,6 +323,22 @@ impl TokenService {
         self.store.is_some()
     }
 
+    /// 撤销某用户的全部令牌（无 store 时为空操作）。
+    pub fn revoke_user(&self, user_id: &str, ttl: Duration) -> Result<()> {
+        if let Some(store) = self.store.as_ref() {
+            store.revoke_user(user_id, ttl)?;
+        }
+        Ok(())
+    }
+
+    /// 发布「踢用户」信号，通知长连接网关关闭该用户活连接（撤销即断）。无 store 时空操作。
+    pub fn publish_kick(&self, user_id: &str) -> Result<()> {
+        if let Some(store) = self.store.as_ref() {
+            store.publish_kick(user_id)?;
+        }
+        Ok(())
+    }
+
     /// Validates the token and returns the decoded claims
     pub fn validate_token(&self, token: &str) -> Result<TokenClaims> {
         let claims = self.decode_claims(token)?;
