@@ -12,6 +12,7 @@ fn principal_from_token_claims_is_business_neutral() {
         jti: "jwt-id".to_string(),
         device_id: Some("device-a".to_string()),
         tenant_id: Some("tenant-a".to_string()),
+        token_use: None,
     };
 
     let principal = AuthenticatedPrincipal::from_token_claims(claims);

@@ -131,17 +131,29 @@ pub struct TokenClaims {
     pub jti: String,
     pub device_id: Option<String>,
     pub tenant_id: Option<String>,
+    /// 令牌用途：`Some("refresh")` 为长效刷新令牌，缺省/`access` 为接入令牌。
+    /// 老令牌没有这个字段，反序列化为 `None`，按接入令牌处理（向后兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_use: Option<String>,
 }
+
+/// refresh 令牌的 `token_use` 取值。
+pub const TOKEN_USE_REFRESH: &str = "refresh";
 
 /// Stateless token service backed by HMAC (HS256)
 pub struct TokenService {
     secret: String,
     issuer: String,
     ttl: Duration,
+    /// 刷新令牌有效期（长效）。默认 30 天，可经 `with_refresh_ttl` 配置。
+    refresh_ttl: Duration,
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
     store: Option<Arc<dyn TokenStore>>,
 }
+
+/// 刷新令牌默认有效期：30 天。
+pub const DEFAULT_REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
 impl TokenService {
     /// Creates a new token service
@@ -156,6 +168,7 @@ impl TokenService {
             secret,
             issuer,
             ttl: Duration::from_secs(ttl_seconds.max(60)),
+            refresh_ttl: Duration::from_secs(DEFAULT_REFRESH_TTL_SECS),
             encoding_key,
             decoding_key,
             store: None,
@@ -166,6 +179,18 @@ impl TokenService {
     pub fn with_store(mut self, store: Arc<dyn TokenStore>) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// 配置刷新令牌有效期（秒）。不小于接入令牌 TTL、不小于 60s。
+    pub fn with_refresh_ttl(mut self, refresh_ttl_secs: u64) -> Self {
+        let secs = refresh_ttl_secs.max(self.ttl.as_secs()).max(60);
+        self.refresh_ttl = Duration::from_secs(secs);
+        self
+    }
+
+    /// 刷新令牌有效期。
+    pub fn refresh_ttl(&self) -> Duration {
+        self.refresh_ttl
     }
 
     /// Issues a token for the given user/device/tenant
@@ -204,6 +229,7 @@ impl TokenService {
             jti: Uuid::new_v4().to_string(),
             device_id: device_id.map(|v| v.to_string()),
             tenant_id: tenant_id.map(|v| v.to_string()),
+            token_use: None,
         };
 
         let token = encode(&Header::default(), &claims, &self.encoding_key)
@@ -214,6 +240,55 @@ impl TokenService {
         }
 
         Ok(token)
+    }
+
+    /// 签发一枚长效刷新令牌（`token_use = "refresh"`，TTL = 配置的刷新有效期）。
+    /// 刷新令牌只用于换新接入令牌，绝不能拿去连长连接（网关校验会拒绝非 access 用途）。
+    pub fn generate_refresh_token(
+        &self,
+        user_id: &str,
+        device_id: Option<&str>,
+        tenant_id: Option<&str>,
+    ) -> Result<String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| anyhow!("system time error: {err}"))?;
+        let iat = now.as_secs() as usize;
+        let exp = (now + self.refresh_ttl).as_secs() as usize;
+        let claims = TokenClaims {
+            sub: user_id.to_string(),
+            iss: self.issuer.clone(),
+            exp,
+            iat,
+            jti: Uuid::new_v4().to_string(),
+            device_id: device_id.map(|v| v.to_string()),
+            tenant_id: tenant_id.map(|v| v.to_string()),
+            token_use: Some(TOKEN_USE_REFRESH.to_string()),
+        };
+        let token = encode(&Header::default(), &claims, &self.encoding_key)
+            .map_err(|err| anyhow!("failed to encode refresh token: {err}"))?;
+        if let Some(store) = self.store.as_ref() {
+            store.register(&claims.sub, &claims.jti, self.refresh_ttl)?;
+        }
+        Ok(token)
+    }
+
+    /// 校验刷新令牌：签名 + 发行方 + **必须未过期**（刷新令牌不给宽限）+ 用途为 refresh + 未撤销。
+    pub fn decode_refresh_claims(&self, token: &str) -> Result<TokenClaims> {
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.set_issuer(&[self.issuer.as_str()]);
+        let claims = decode::<TokenClaims>(token, &self.decoding_key, &validation)
+            .map(|data| data.claims)
+            .map_err(|err| anyhow!("invalid refresh token: {err}"))?;
+        if claims.token_use.as_deref() != Some(TOKEN_USE_REFRESH) {
+            return Err(anyhow!("not a refresh token"));
+        }
+        if let Some(store) = self.store.as_ref()
+            && store.is_revoked(&claims.jti)?
+        {
+            return Err(anyhow!("refresh token revoked"));
+        }
+        Ok(claims)
     }
 
     /// Decodes and verifies signature + issuer, but tolerates an expired `exp`.

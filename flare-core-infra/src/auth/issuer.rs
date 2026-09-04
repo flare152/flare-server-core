@@ -31,6 +31,12 @@ pub struct IssuedToken {
     pub tenant_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// 长效刷新令牌：接入令牌过期后凭它换新，无需重新登录（7x24）。
+    /// `core_jwt` 形态签发/刷新时下发；`http_hook` 由业务端决定是否下发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_expires_at: Option<u64>,
 }
 
 #[async_trait]
@@ -80,12 +86,20 @@ impl CoreJwtTokenIssuer {
             .service
             .decode_claims_allow_expired(&token)
             .map_err(|err| AuthError::ProviderUnavailable(err.to_string()))?;
+        // 同时下发一枚长效刷新令牌：接入令牌短命也能靠它维持 7x24 会话。
+        let refresh_token = self
+            .service
+            .generate_refresh_token(user_id, device_id, tenant_id)
+            .map_err(|err| AuthError::ProviderUnavailable(err.to_string()))?;
+        let refresh_expires_at = Self::now_secs() + self.service.refresh_ttl().as_secs();
         Ok(IssuedToken {
             token,
             expires_at: claims.exp as u64,
             user_id: claims.sub,
             tenant_id: claims.tenant_id,
             device_id: claims.device_id,
+            refresh_token: Some(refresh_token),
+            refresh_expires_at: Some(refresh_expires_at),
         })
     }
 }
@@ -97,11 +111,30 @@ impl TokenIssuer for CoreJwtTokenIssuer {
     }
 
     async fn refresh(&self, current_token: &str) -> std::result::Result<IssuedToken, AuthError> {
+        let now = Self::now_secs();
+        // 优先按**刷新令牌**处理：签名对、未过期、用途 refresh、未撤销就放行。
+        // 这是长效凭证，接入令牌早已过期也能换新——7x24 的关键。
+        if let Ok(refresh_claims) = self.service.decode_refresh_claims(current_token) {
+            let fresh = self.issue_sync(&TokenIssueRequest {
+                user_id: refresh_claims.sub.clone(),
+                tenant_id: refresh_claims.tenant_id.clone(),
+                device_id: refresh_claims.device_id.clone(),
+                ttl_secs: None,
+            })?;
+            // 轮换刷新令牌：旧的作废到它自己到期，杜绝被盗刷新令牌长期可用。
+            let refresh_revoke_ttl =
+                Duration::from_secs((refresh_claims.exp as u64).saturating_sub(now)).max(Duration::from_secs(1));
+            self.service
+                .revoke(&refresh_claims, refresh_revoke_ttl)
+                .map_err(|err| AuthError::ProviderUnavailable(err.to_string()))?;
+            return Ok(fresh);
+        }
+
+        // 兼容旧客户端：拿（可能已过期但在宽限内的）接入令牌换新。
         let claims = self
             .service
             .decode_claims_allow_expired(current_token)
             .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
-        let now = Self::now_secs();
         let exp = claims.exp as u64;
         if exp + self.refresh_grace.as_secs() < now {
             return Err(AuthError::InvalidToken(format!(
@@ -276,6 +309,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issue_returns_refresh_token_and_refresh_token_grant_works() {
+        let svc = service(3600);
+        let issuer = CoreJwtTokenIssuer::new(svc.clone(), Duration::from_secs(60));
+        let issued = issuer
+            .issue(TokenIssueRequest { user_id: "u7".into(), tenant_id: Some("0".into()), device_id: None, ttl_secs: None })
+            .await
+            .unwrap();
+        // 签发同时下发了刷新令牌，且其有效期远长于接入令牌。
+        let refresh = issued.refresh_token.clone().expect("应当下发 refresh token");
+        assert!(issued.refresh_expires_at.unwrap() > issued.expires_at, "refresh 应比 access 长效");
+        // 用刷新令牌换新（即使接入令牌已过期也应成立——这里直接用刷新令牌）。
+        let renewed = issuer.refresh(&refresh).await.expect("refresh-token grant 应成功");
+        assert_eq!(renewed.user_id, "u7");
+        assert!(renewed.refresh_token.is_some(), "换新应轮换出新的 refresh token");
+        // 轮换后旧刷新令牌作废（有 store 时）。
+        if svc.has_store() {
+            assert!(issuer.refresh(&refresh).await.is_err(), "旧 refresh token 轮换后应失效");
+        }
+    }
+
+    #[tokio::test]
     async fn refresh_keeps_identity_and_rejects_wrong_secret() {
         let svc = service(3600);
         let issuer = CoreJwtTokenIssuer::new(svc.clone(), Duration::from_secs(60));
@@ -311,6 +365,7 @@ mod tests {
                 jti: "j-expired".into(),
                 device_id: None,
                 tenant_id: None,
+                token_use: None,
             };
             encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).unwrap()
         };

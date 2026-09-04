@@ -17,4 +17,4 @@ pub use provider::{
     build_token_validator,
 };
 pub use store::{RedisTokenStore, TokenStore};
-pub use token::{TokenClaims, TokenService};
+pub use token::{DEFAULT_REFRESH_TTL_SECS, TokenClaims, TokenService, TOKEN_USE_REFRESH};
