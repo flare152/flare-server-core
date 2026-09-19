@@ -41,7 +41,10 @@ pub struct IssuedToken {
 
 #[async_trait]
 pub trait TokenIssuer: Send + Sync {
-    async fn issue(&self, request: TokenIssueRequest) -> std::result::Result<IssuedToken, AuthError>;
+    async fn issue(
+        &self,
+        request: TokenIssueRequest,
+    ) -> std::result::Result<IssuedToken, AuthError>;
     /// 用当前 token（可已过期但在宽限期内）换一枚新 token。
     async fn refresh(&self, current_token: &str) -> std::result::Result<IssuedToken, AuthError>;
 }
@@ -67,7 +70,10 @@ impl CoreJwtTokenIssuer {
             .unwrap_or(0)
     }
 
-    fn issue_sync(&self, request: &TokenIssueRequest) -> std::result::Result<IssuedToken, AuthError> {
+    fn issue_sync(
+        &self,
+        request: &TokenIssueRequest,
+    ) -> std::result::Result<IssuedToken, AuthError> {
         let user_id = request.user_id.trim();
         if user_id.is_empty() {
             return Err(AuthError::InvalidToken("user_id is required".into()));
@@ -76,8 +82,16 @@ impl CoreJwtTokenIssuer {
             .ttl_secs
             .map(Duration::from_secs)
             .unwrap_or_else(|| self.service.ttl());
-        let tenant_id = request.tenant_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let device_id = request.device_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let tenant_id = request
+            .tenant_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let device_id = request
+            .device_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let token = self
             .service
             .generate_token_with_ttl(user_id, device_id, tenant_id, ttl)
@@ -106,7 +120,10 @@ impl CoreJwtTokenIssuer {
 
 #[async_trait]
 impl TokenIssuer for CoreJwtTokenIssuer {
-    async fn issue(&self, request: TokenIssueRequest) -> std::result::Result<IssuedToken, AuthError> {
+    async fn issue(
+        &self,
+        request: TokenIssueRequest,
+    ) -> std::result::Result<IssuedToken, AuthError> {
         self.issue_sync(&request)
     }
 
@@ -123,7 +140,8 @@ impl TokenIssuer for CoreJwtTokenIssuer {
             })?;
             // 轮换刷新令牌：旧的作废到它自己到期，杜绝被盗刷新令牌长期可用。
             let refresh_revoke_ttl =
-                Duration::from_secs((refresh_claims.exp as u64).saturating_sub(now)).max(Duration::from_secs(1));
+                Duration::from_secs((refresh_claims.exp as u64).saturating_sub(now))
+                    .max(Duration::from_secs(1));
             self.service
                 .revoke(&refresh_claims, refresh_revoke_ttl)
                 .map_err(|err| AuthError::ProviderUnavailable(err.to_string()))?;
@@ -203,32 +221,40 @@ impl HttpHookTokenIssuer {
         })
     }
 
-    async fn call(&self, body: HookIssueRequest<'_>) -> std::result::Result<IssuedToken, AuthError> {
+    async fn call(
+        &self,
+        body: HookIssueRequest<'_>,
+    ) -> std::result::Result<IssuedToken, AuthError> {
         let mut request = self.client.post(&self.endpoint).json(&body);
         if let Some(secret) = self.secret.as_ref() {
             request = request.header(self.secret_header.clone(), secret);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|err| AuthError::ProviderUnavailable(format!("auth hook request failed: {err}")))?;
+        let response = request.send().await.map_err(|err| {
+            AuthError::ProviderUnavailable(format!("auth hook request failed: {err}"))
+        })?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(AuthError::InvalidToken(format!("auth hook rejected the request ({status})")));
+            return Err(AuthError::InvalidToken(format!(
+                "auth hook rejected the request ({status})"
+            )));
         }
         if !status.is_success() {
-            return Err(AuthError::ProviderUnavailable(format!("auth hook returned {status}")));
+            return Err(AuthError::ProviderUnavailable(format!(
+                "auth hook returned {status}"
+            )));
         }
-        response
-            .json::<IssuedToken>()
-            .await
-            .map_err(|err| AuthError::ProviderUnavailable(format!("auth hook returned an invalid body: {err}")))
+        response.json::<IssuedToken>().await.map_err(|err| {
+            AuthError::ProviderUnavailable(format!("auth hook returned an invalid body: {err}"))
+        })
     }
 }
 
 #[async_trait]
 impl TokenIssuer for HttpHookTokenIssuer {
-    async fn issue(&self, request: TokenIssueRequest) -> std::result::Result<IssuedToken, AuthError> {
+    async fn issue(
+        &self,
+        request: TokenIssueRequest,
+    ) -> std::result::Result<IssuedToken, AuthError> {
         self.call(HookIssueRequest {
             action: "issue",
             user_id: Some(request.user_id.as_str()),
@@ -264,7 +290,13 @@ pub fn build_token_issuer(
             Duration::from_secs(config.refresh_grace_secs),
         )))),
         AuthProviderMode::HttpHook => {
-            if config.hook_issue_url.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            if config
+                .hook_issue_url
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
                 return Ok(None);
             }
             Ok(Some(Arc::new(HttpHookTokenIssuer::new(config)?)))
@@ -278,7 +310,11 @@ mod tests {
     use std::sync::Mutex;
 
     fn service(ttl: u64) -> Arc<TokenService> {
-        Arc::new(TokenService::new("a-strong-shared-secret-with-more-than-32-bytes!", "flare-im-core", ttl))
+        Arc::new(TokenService::new(
+            "a-strong-shared-secret-with-more-than-32-bytes!",
+            "flare-im-core",
+            ttl,
+        ))
     }
 
     #[tokio::test]
@@ -297,14 +333,20 @@ mod tests {
         assert_eq!(issued.tenant_id.as_deref(), Some("0"));
         assert_eq!(issued.device_id.as_deref(), Some("ios-1"));
         let now = CoreJwtTokenIssuer::now_secs();
-        assert!(issued.expires_at <= now + 3600, "请求 24h 也不能超过服务 TTL 1h");
+        assert!(
+            issued.expires_at <= now + 3600,
+            "请求 24h 也不能超过服务 TTL 1h"
+        );
         assert!(issued.expires_at >= now + 3600 - 5);
     }
 
     #[tokio::test]
     async fn issue_rejects_empty_user() {
         let issuer = CoreJwtTokenIssuer::new(service(3600), Duration::from_secs(60));
-        let err = issuer.issue(TokenIssueRequest::default()).await.unwrap_err();
+        let err = issuer
+            .issue(TokenIssueRequest::default())
+            .await
+            .unwrap_err();
         assert!(matches!(err, AuthError::InvalidToken(_)));
     }
 
@@ -313,19 +355,39 @@ mod tests {
         let svc = service(3600);
         let issuer = CoreJwtTokenIssuer::new(svc.clone(), Duration::from_secs(60));
         let issued = issuer
-            .issue(TokenIssueRequest { user_id: "u7".into(), tenant_id: Some("0".into()), device_id: None, ttl_secs: None })
+            .issue(TokenIssueRequest {
+                user_id: "u7".into(),
+                tenant_id: Some("0".into()),
+                device_id: None,
+                ttl_secs: None,
+            })
             .await
             .unwrap();
         // 签发同时下发了刷新令牌，且其有效期远长于接入令牌。
-        let refresh = issued.refresh_token.clone().expect("应当下发 refresh token");
-        assert!(issued.refresh_expires_at.unwrap() > issued.expires_at, "refresh 应比 access 长效");
+        let refresh = issued
+            .refresh_token
+            .clone()
+            .expect("应当下发 refresh token");
+        assert!(
+            issued.refresh_expires_at.unwrap() > issued.expires_at,
+            "refresh 应比 access 长效"
+        );
         // 用刷新令牌换新（即使接入令牌已过期也应成立——这里直接用刷新令牌）。
-        let renewed = issuer.refresh(&refresh).await.expect("refresh-token grant 应成功");
+        let renewed = issuer
+            .refresh(&refresh)
+            .await
+            .expect("refresh-token grant 应成功");
         assert_eq!(renewed.user_id, "u7");
-        assert!(renewed.refresh_token.is_some(), "换新应轮换出新的 refresh token");
+        assert!(
+            renewed.refresh_token.is_some(),
+            "换新应轮换出新的 refresh token"
+        );
         // 轮换后旧刷新令牌作废（有 store 时）。
         if svc.has_store() {
-            assert!(issuer.refresh(&refresh).await.is_err(), "旧 refresh token 轮换后应失效");
+            assert!(
+                issuer.refresh(&refresh).await.is_err(),
+                "旧 refresh token 轮换后应失效"
+            );
         }
     }
 
@@ -334,7 +396,12 @@ mod tests {
         let svc = service(3600);
         let issuer = CoreJwtTokenIssuer::new(svc.clone(), Duration::from_secs(60));
         let first = issuer
-            .issue(TokenIssueRequest { user_id: "u1".into(), tenant_id: Some("t9".into()), device_id: None, ttl_secs: None })
+            .issue(TokenIssueRequest {
+                user_id: "u1".into(),
+                tenant_id: Some("t9".into()),
+                device_id: None,
+                ttl_secs: None,
+            })
             .await
             .unwrap();
         let second = issuer.refresh(&first.token).await.expect("refresh");
@@ -343,7 +410,11 @@ mod tests {
         assert_ne!(second.token, first.token);
 
         let other = CoreJwtTokenIssuer::new(
-            Arc::new(TokenService::new("another-secret-that-is-also-long-enough!!", "flare-im-core", 3600)),
+            Arc::new(TokenService::new(
+                "another-secret-that-is-also-long-enough!!",
+                "flare-im-core",
+                3600,
+            )),
             Duration::from_secs(60),
         );
         let err = other.refresh(&first.token).await.unwrap_err();
@@ -367,14 +438,25 @@ mod tests {
                 tenant_id: None,
                 token_use: None,
             };
-            encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).unwrap()
+            encode(
+                &Header::default(),
+                &claims,
+                &EncodingKey::from_secret(secret.as_bytes()),
+            )
+            .unwrap()
         };
         let svc = Arc::new(TokenService::new(secret, "flare-im-core", 3600));
         let generous = CoreJwtTokenIssuer::new(svc.clone(), Duration::from_secs(1000));
-        assert!(generous.refresh(&expired).await.is_ok(), "过期 100s、宽限 1000s：允许换新");
+        assert!(
+            generous.refresh(&expired).await.is_ok(),
+            "过期 100s、宽限 1000s：允许换新"
+        );
         let strict = CoreJwtTokenIssuer::new(svc, Duration::from_secs(10));
         let err = strict.refresh(&expired).await.unwrap_err();
-        assert!(matches!(err, AuthError::InvalidToken(_)), "过期 100s、宽限 10s：拒绝");
+        assert!(
+            matches!(err, AuthError::InvalidToken(_)),
+            "过期 100s、宽限 10s：拒绝"
+        );
     }
 
     #[derive(Default)]
@@ -401,23 +483,40 @@ mod tests {
     async fn refresh_rotates_when_a_store_is_attached() {
         let store = Arc::new(MemStore::default());
         let svc = Arc::new(
-            TokenService::new("a-strong-shared-secret-with-more-than-32-bytes!", "flare-im-core", 3600)
-                .with_store(store.clone()),
+            TokenService::new(
+                "a-strong-shared-secret-with-more-than-32-bytes!",
+                "flare-im-core",
+                3600,
+            )
+            .with_store(store.clone()),
         );
         let issuer = CoreJwtTokenIssuer::new(svc.clone(), Duration::from_secs(60));
         let first = issuer
-            .issue(TokenIssueRequest { user_id: "u3".into(), ..Default::default() })
+            .issue(TokenIssueRequest {
+                user_id: "u3".into(),
+                ..Default::default()
+            })
             .await
             .unwrap();
         let _second = issuer.refresh(&first.token).await.unwrap();
-        assert_eq!(store.revoked.lock().unwrap().len(), 1, "刷新后旧 jti 必须作废");
+        assert_eq!(
+            store.revoked.lock().unwrap().len(),
+            1,
+            "刷新后旧 jti 必须作废"
+        );
         let err = issuer.refresh(&first.token).await.unwrap_err();
-        assert!(matches!(err, AuthError::InvalidToken(_)), "作废的 token 不能再换新: {err}");
+        assert!(
+            matches!(err, AuthError::InvalidToken(_)),
+            "作废的 token 不能再换新: {err}"
+        );
     }
 
     #[test]
     fn hook_issuer_requires_issue_url_and_build_returns_none_without_it() {
-        let cfg = AuthProviderConfig { mode: AuthProviderMode::HttpHook, ..Default::default() };
+        let cfg = AuthProviderConfig {
+            mode: AuthProviderMode::HttpHook,
+            ..Default::default()
+        };
         assert!(build_token_issuer(&cfg, service(60)).unwrap().is_none());
         let cfg = AuthProviderConfig {
             mode: AuthProviderMode::HttpHook,
@@ -429,11 +528,15 @@ mod tests {
 
     #[test]
     fn app_credentials_parse_and_validate() {
-        let creds = AppCredential::parse_list("app1:0123456789abcdef, app2:fedcba9876543210x").unwrap();
+        let creds =
+            AppCredential::parse_list("app1:0123456789abcdef, app2:fedcba9876543210x").unwrap();
         assert_eq!(creds.len(), 2);
         assert_eq!(creds[0].app_id, "app1");
         assert!(AppCredential::parse_list("nosecret").is_err());
-        assert!(AppCredential::parse_list("app:short").is_err(), "secret 太短必须拒绝");
+        assert!(
+            AppCredential::parse_list("app:short").is_err(),
+            "secret 太短必须拒绝"
+        );
     }
 
     use super::super::AppCredential;

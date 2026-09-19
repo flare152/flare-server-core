@@ -93,9 +93,14 @@ impl AppCredential {
             };
             let (app_id, secret) = (app_id.trim(), secret.trim());
             if app_id.is_empty() || secret.len() < 16 {
-                anyhow::bail!("app credential `{app_id}` needs a non-empty app_id and a secret of at least 16 bytes");
+                anyhow::bail!(
+                    "app credential `{app_id}` needs a non-empty app_id and a secret of at least 16 bytes"
+                );
             }
-            out.push(Self { app_id: app_id.to_string(), secret: secret.to_string() });
+            out.push(Self {
+                app_id: app_id.to_string(),
+                secret: secret.to_string(),
+            });
         }
         Ok(out)
     }
@@ -309,9 +314,9 @@ impl TokenValidator for ChainedTokenValidator {
                 Err(err @ AuthError::ProviderUnavailable(_)) => had_unavailable = Some(err),
             }
         }
-        Err(had_unavailable
-            .or(last_invalid)
-            .unwrap_or_else(|| AuthError::InvalidToken("no validator accepted the token".to_string())))
+        Err(had_unavailable.or(last_invalid).unwrap_or_else(|| {
+            AuthError::InvalidToken("no validator accepted the token".to_string())
+        }))
     }
 }
 
@@ -326,7 +331,12 @@ pub fn build_token_validator(
         // 这就是「既能 core 独立验证，又能适配三方 token 验证」的混合形态。
         AuthProviderMode::CoreJwt => {
             let local = build_core_jwt_token_validator(token_service, trusted_issuers)?;
-            match config.hook_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            match config
+                .hook_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 Some(_) => {
                     let hook = build_http_hook_token_validator(config)?;
                     Ok(Arc::new(ChainedTokenValidator::new(vec![local, hook])))
@@ -430,7 +440,13 @@ mod tests {
     }
 
     fn req(token: &str) -> TokenValidationRequest {
-        TokenValidationRequest { token: token.into(), trace_id: None, request_id: None, path: None, method: None }
+        TokenValidationRequest {
+            token: token.into(),
+            trace_id: None,
+            request_id: None,
+            path: None,
+            method: None,
+        }
     }
 
     #[test]
@@ -449,10 +465,19 @@ mod tests {
     async fn chained_validates_local_first_then_hook_fallback() {
         // 层1=本地(认 "core-tok")，层2=hook(认 "3p-tok")
         let chain = ChainedTokenValidator::new(vec![stub("core-tok"), stub("3p-tok")]);
-        assert_eq!(chain.validate(req("core-tok")).await.unwrap().user_id, "u-core-tok");
-        assert_eq!(chain.validate(req("3p-tok")).await.unwrap().user_id, "u-3p-tok");
+        assert_eq!(
+            chain.validate(req("core-tok")).await.unwrap().user_id,
+            "u-core-tok"
+        );
+        assert_eq!(
+            chain.validate(req("3p-tok")).await.unwrap().user_id,
+            "u-3p-tok"
+        );
         // 两层都不认 -> InvalidToken
-        assert!(matches!(chain.validate(req("nope")).await.unwrap_err(), AuthError::InvalidToken(_)));
+        assert!(matches!(
+            chain.validate(req("nope")).await.unwrap_err(),
+            AuthError::InvalidToken(_)
+        ));
     }
 
     #[tokio::test]
@@ -462,21 +487,31 @@ mod tests {
         let local = stub("core-tok");
         let down = Arc::new(StubValidator {
             accepts: None,
-            result: std::sync::Arc::new(std::sync::Mutex::new(Some(AuthError::ProviderUnavailable("hook down".into())))),
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(
+                AuthError::ProviderUnavailable("hook down".into()),
+            ))),
         });
         let chain = ChainedTokenValidator::new(vec![local, down]);
-        assert!(matches!(chain.validate(req("3p-tok")).await.unwrap_err(), AuthError::ProviderUnavailable(_)));
+        assert!(matches!(
+            chain.validate(req("3p-tok")).await.unwrap_err(),
+            AuthError::ProviderUnavailable(_)
+        ));
     }
 
     #[tokio::test]
     async fn chained_forbidden_short_circuits() {
         let forbid = Arc::new(StubValidator {
             accepts: None,
-            result: std::sync::Arc::new(std::sync::Mutex::new(Some(AuthError::Forbidden("nope".into())))),
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(AuthError::Forbidden(
+                "nope".into(),
+            )))),
         });
         let never = stub("never");
         let chain = ChainedTokenValidator::new(vec![forbid, never]);
-        assert!(matches!(chain.validate(req("x")).await.unwrap_err(), AuthError::Forbidden(_)));
+        assert!(matches!(
+            chain.validate(req("x")).await.unwrap_err(),
+            AuthError::Forbidden(_)
+        ));
     }
 
     #[tokio::test]
