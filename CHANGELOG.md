@@ -18,6 +18,8 @@
 - `TokenService::generate_token_with_use` / `validate_token_with_use` 与 `TOKEN_USE_CONTROL`:
   带显式用途的短期服务间令牌(控制面 → 数据面),接收方校验 `token_use`,普通接入令牌
   打不了管理接口。`generate_token_with_ttl` 改为其特例,行为不变。
+- `TOKEN_USE_ADMIN = "admin"`:`AuthenticatedPrincipal::from_token_claims` 对该用途派生 `admin:*` scope,
+  让核 admin-gateway 能接受本地 HS256 签发的管理令牌(此前 scopes 恒空,任何令牌都 403)。
 
 ### 其他
 

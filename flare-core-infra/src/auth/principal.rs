@@ -33,7 +33,13 @@ impl AuthenticatedPrincipal {
             device_id: claims.device_id,
             app_id: None,
             expires_at: Some(claims.exp as i64),
-            scopes: Vec::new(),
+            // HS256 令牌没有 scope 声明;管理用途由 `token_use = "admin"` 表达,
+            // 在这里派生成 `admin:*`,否则 admin-gateway 对本地签发的任何令牌都是 403。
+            scopes: if claims.token_use.as_deref() == Some(super::token::TOKEN_USE_ADMIN) {
+                vec!["admin:*".to_string()]
+            } else {
+                Vec::new()
+            },
             metadata: HashMap::new(),
         }
     }
@@ -92,4 +98,29 @@ fn scope_matches(granted: &str, required: &str) -> bool {
         return required == prefix || required.starts_with(&format!("{prefix}:"));
     }
     false
+}
+
+#[cfg(test)]
+mod token_use_tests {
+    use super::*;
+
+    fn claims(token_use: Option<&str>) -> TokenClaims {
+        TokenClaims {
+            sub: "emp".into(),
+            iss: "x".into(),
+            exp: 1,
+            iat: 0,
+            jti: "j".into(),
+            device_id: None,
+            tenant_id: Some("0".into()),
+            token_use: token_use.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn admin_token_use_derives_admin_scope() {
+        assert!(AuthenticatedPrincipal::from_token_claims(claims(Some("admin"))).has_gateway_admin_scope());
+        assert!(!AuthenticatedPrincipal::from_token_claims(claims(None)).has_gateway_admin_scope());
+        assert!(!AuthenticatedPrincipal::from_token_claims(claims(Some("control"))).has_gateway_admin_scope());
+    }
 }

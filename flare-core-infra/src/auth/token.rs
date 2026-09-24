@@ -141,6 +141,8 @@ pub struct TokenClaims {
 pub const TOKEN_USE_REFRESH: &str = "refresh";
 /// 控制面 → 数据面服务间令牌的 `token_use` 取值。
 pub const TOKEN_USE_CONTROL: &str = "control";
+/// 核 admin-gateway 管理令牌的 `token_use` 取值:校验后派生 `admin:*` scope。
+pub const TOKEN_USE_ADMIN: &str = "admin";
 
 /// Stateless token service backed by HMAC (HS256)
 pub struct TokenService {

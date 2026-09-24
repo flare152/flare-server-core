@@ -17,4 +17,7 @@ pub use provider::{
     build_core_jwt_token_validator, build_http_hook_token_validator, build_token_validator,
 };
 pub use store::{RedisTokenStore, TokenStore};
-pub use token::{DEFAULT_REFRESH_TTL_SECS, TOKEN_USE_CONTROL, TOKEN_USE_REFRESH, TokenClaims, TokenService};
+pub use token::{
+    DEFAULT_REFRESH_TTL_SECS, TOKEN_USE_ADMIN, TOKEN_USE_CONTROL, TOKEN_USE_REFRESH, TokenClaims,
+    TokenService,
+};
