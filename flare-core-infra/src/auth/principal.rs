@@ -119,8 +119,14 @@ mod token_use_tests {
 
     #[test]
     fn admin_token_use_derives_admin_scope() {
-        assert!(AuthenticatedPrincipal::from_token_claims(claims(Some("admin"))).has_gateway_admin_scope());
+        assert!(
+            AuthenticatedPrincipal::from_token_claims(claims(Some("admin")))
+                .has_gateway_admin_scope()
+        );
         assert!(!AuthenticatedPrincipal::from_token_claims(claims(None)).has_gateway_admin_scope());
-        assert!(!AuthenticatedPrincipal::from_token_claims(claims(Some("control"))).has_gateway_admin_scope());
+        assert!(
+            !AuthenticatedPrincipal::from_token_claims(claims(Some("control")))
+                .has_gateway_admin_scope()
+        );
     }
 }

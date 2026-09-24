@@ -65,9 +65,10 @@ impl CompositeTokenValidator {
     }
 
     pub fn validate_token(&self, token: &str) -> Result<TokenClaims> {
-        if let Ok(claims) = self.primary.validate_token(token) {
-            return Ok(claims);
-        }
+        let primary_err = match self.primary.validate_token(token) {
+            Ok(claims) => return Ok(claims),
+            Err(err) => err,
+        };
         let mut last_err: Option<anyhow::Error> = None;
         for trusted in &self.trusted {
             match trusted.validate(token) {
@@ -75,7 +76,11 @@ impl CompositeTokenValidator {
                 Err(err) => last_err = Some(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("token validation failed")))
+        // With no trusted issuers configured, keep the primary validator's
+        // concrete failure (expired, bad signature, revoked, ...). Replacing
+        // it with a generic message made reconnect failures impossible to
+        // diagnose from the gateway log.
+        Err(last_err.unwrap_or(primary_err))
     }
 }
 
