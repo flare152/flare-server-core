@@ -139,6 +139,8 @@ pub struct TokenClaims {
 
 /// refresh 令牌的 `token_use` 取值。
 pub const TOKEN_USE_REFRESH: &str = "refresh";
+/// 控制面 → 数据面服务间令牌的 `token_use` 取值。
+pub const TOKEN_USE_CONTROL: &str = "control";
 
 /// Stateless token service backed by HMAC (HS256)
 pub struct TokenService {
@@ -214,6 +216,20 @@ impl TokenService {
         tenant_id: Option<&str>,
         ttl: Duration,
     ) -> Result<String> {
+        self.generate_token_with_use(user_id, device_id, tenant_id, ttl, None)
+    }
+
+    /// 签发一枚带显式用途(`token_use`)的短期令牌。控制面 → 数据面的服务间令牌走这里
+    /// (`token_use = "control"`),接收方用 [`validate_token_with_use`](Self::validate_token_with_use)
+    /// 校验用途,避免一枚普通接入令牌被拿去打管理接口。
+    pub fn generate_token_with_use(
+        &self,
+        user_id: &str,
+        device_id: Option<&str>,
+        tenant_id: Option<&str>,
+        ttl: Duration,
+        token_use: Option<&str>,
+    ) -> Result<String> {
         let ttl = ttl.clamp(Duration::from_secs(60), self.ttl);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -229,7 +245,7 @@ impl TokenService {
             jti: Uuid::new_v4().to_string(),
             device_id: device_id.map(|v| v.to_string()),
             tenant_id: tenant_id.map(|v| v.to_string()),
-            token_use: None,
+            token_use: token_use.map(|v| v.to_string()),
         };
 
         let token = encode(&Header::default(), &claims, &self.encoding_key)
@@ -337,6 +353,15 @@ impl TokenService {
             store.publish_kick(user_id)?;
         }
         Ok(())
+    }
+
+    /// 校验令牌且要求 `token_use` 恰为 `expected`(缺省用途视为不匹配)。
+    pub fn validate_token_with_use(&self, token: &str, expected: &str) -> Result<TokenClaims> {
+        let claims = self.validate_token(token)?;
+        if claims.token_use.as_deref() != Some(expected) {
+            return Err(anyhow!("token_use mismatch: expected {expected}"));
+        }
+        Ok(claims)
     }
 
     /// Validates the token and returns the decoded claims
