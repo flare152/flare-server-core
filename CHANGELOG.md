@@ -13,6 +13,12 @@
 - `async-nats` 0.42 → 0.50，消除 `rustls-webpki` 0.102 的**四条公告**。
   依赖是间接引入的，升级 `async-nats` 是唯一能把它带上去的路径。
 
+### 新增
+
+- `TokenService::generate_token_with_use` / `validate_token_with_use` 与 `TOKEN_USE_CONTROL`:
+  带显式用途的短期服务间令牌(控制面 → 数据面),接收方校验 `token_use`,普通接入令牌
+  打不了管理接口。`generate_token_with_ttl` 改为其特例,行为不变。
+
 ### 其他
 
 - 补齐 crate 的发布元信息（关键词、分类等）。没有关键词等于在 crates.io
