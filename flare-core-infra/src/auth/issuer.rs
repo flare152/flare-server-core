@@ -528,10 +528,20 @@ mod tests {
 
     #[test]
     fn app_credentials_parse_and_validate() {
-        let creds =
-            AppCredential::parse_list("app1:0123456789abcdef, app2:fedcba9876543210x").unwrap();
+        let creds = AppCredential::parse_list(
+            "app1:tenant1:0123456789abcdef, app2:tenant2:fedcba9876543210x",
+        )
+        .unwrap();
         assert_eq!(creds.len(), 2);
         assert_eq!(creds[0].app_id, "app1");
+        assert_eq!(creds[0].tenant_id, "tenant1");
+        assert!(AppCredential::parse_list("app:0123456789abcdef").is_err());
+        assert!(AppCredential::parse_list("app::0123456789abcdef").is_err());
+        assert!(
+            AppCredential::parse_list("app:a:0123456789abcdef,app:b:fedcba9876543210").is_err()
+        );
+        let error = AppCredential::parse_list("secret-material-without-separators").unwrap_err();
+        assert!(!error.to_string().contains("secret-material"));
         assert!(AppCredential::parse_list("nosecret").is_err());
         assert!(
             AppCredential::parse_list("app:short").is_err(),

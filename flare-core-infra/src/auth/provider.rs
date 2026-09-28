@@ -80,25 +80,35 @@ fn default_refresh_grace_secs() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AppCredential {
     pub app_id: String,
+    /// Authoritative data-plane tenant. Never supplied by the token issuance caller.
+    pub tenant_id: String,
     pub secret: String,
 }
 
 impl AppCredential {
-    /// 解析 `app1:secret1,app2:secret2` 形式的环境变量。
+    /// 解析 `app1:tenant1:secret1,app2:tenant2:secret2` 形式的环境变量。
     pub fn parse_list(value: &str) -> Result<Vec<Self>> {
         let mut out = Vec::new();
         for item in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            let Some((app_id, secret)) = item.split_once(':') else {
-                anyhow::bail!("app credential `{item}` must be `app_id:secret`");
+            let mut fields = item.splitn(3, ':');
+            let (Some(app_id), Some(tenant_id), Some(secret)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                // Never include input: a malformed entry may itself contain the secret.
+                anyhow::bail!("app credential must be `app_id:tenant_id:secret`");
             };
-            let (app_id, secret) = (app_id.trim(), secret.trim());
-            if app_id.is_empty() || secret.len() < 16 {
+            let (app_id, tenant_id, secret) = (app_id.trim(), tenant_id.trim(), secret.trim());
+            if app_id.is_empty() || tenant_id.is_empty() || secret.len() < 16 {
                 anyhow::bail!(
-                    "app credential `{app_id}` needs a non-empty app_id and a secret of at least 16 bytes"
+                    "app credential needs non-empty app_id, tenant_id and a secret of at least 16 bytes"
                 );
+            }
+            if out.iter().any(|cred: &Self| cred.app_id == app_id) {
+                anyhow::bail!("duplicate app credential id");
             }
             out.push(Self {
                 app_id: app_id.to_string(),
+                tenant_id: tenant_id.to_string(),
                 secret: secret.to_string(),
             });
         }
