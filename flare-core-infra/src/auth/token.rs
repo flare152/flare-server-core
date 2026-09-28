@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
+use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac};
 use jsonwebtoken::crypto::{CryptoProvider, JwkUtils, JwtSigner, JwtVerifier};
 use jsonwebtoken::errors::{ErrorKind, Result as JwtResult, new_error};
@@ -90,7 +93,40 @@ define_hmac_verifier!(Hs256Verifier, Algorithm::HS256, HmacSha256);
 define_hmac_verifier!(Hs384Verifier, Algorithm::HS384, HmacSha384);
 define_hmac_verifier!(Hs512Verifier, Algorithm::HS512, HmacSha512);
 
-static HMAC_ONLY_JWT_PROVIDER: CryptoProvider = CryptoProvider {
+struct Ed25519Signer(SigningKey);
+
+impl Signer<Vec<u8>> for Ed25519Signer {
+    fn try_sign(&self, msg: &[u8]) -> std::result::Result<Vec<u8>, jsonwebtoken::signature::Error> {
+        Ok(self.0.sign(msg).to_bytes().to_vec())
+    }
+}
+
+impl JwtSigner for Ed25519Signer {
+    fn algorithm(&self) -> Algorithm {
+        Algorithm::EdDSA
+    }
+}
+
+struct Ed25519Verifier(VerifyingKey);
+
+impl Verifier<Vec<u8>> for Ed25519Verifier {
+    fn verify(
+        &self,
+        msg: &[u8],
+        signature: &Vec<u8>,
+    ) -> std::result::Result<(), jsonwebtoken::signature::Error> {
+        self.0
+            .verify_strict(msg, &Signature::from_slice(signature)?)
+    }
+}
+
+impl JwtVerifier for Ed25519Verifier {
+    fn algorithm(&self) -> Algorithm {
+        Algorithm::EdDSA
+    }
+}
+
+static FLARE_JWT_PROVIDER: CryptoProvider = CryptoProvider {
     signer_factory: hmac_signer_factory,
     verifier_factory: hmac_verifier_factory,
     jwk_utils: JwkUtils::new_unimplemented(),
@@ -101,6 +137,10 @@ fn hmac_signer_factory(algorithm: &Algorithm, key: &EncodingKey) -> JwtResult<Bo
         Algorithm::HS256 => Ok(Box::new(Hs256Signer::new(key)?)),
         Algorithm::HS384 => Ok(Box::new(Hs384Signer::new(key)?)),
         Algorithm::HS512 => Ok(Box::new(Hs512Signer::new(key)?)),
+        Algorithm::EdDSA => Ok(Box::new(Ed25519Signer(
+            SigningKey::from_pkcs8_der(key.inner())
+                .map_err(|_| new_error(ErrorKind::InvalidEddsaKey))?,
+        ))),
         _ => Err(new_error(ErrorKind::InvalidAlgorithm)),
     }
 }
@@ -113,12 +153,41 @@ fn hmac_verifier_factory(
         Algorithm::HS256 => Ok(Box::new(Hs256Verifier::new(key)?)),
         Algorithm::HS384 => Ok(Box::new(Hs384Verifier::new(key)?)),
         Algorithm::HS512 => Ok(Box::new(Hs512Verifier::new(key)?)),
+        Algorithm::EdDSA => {
+            // Exact-length conversion avoids panicking or accepting truncated keys.
+            let bytes: &[u8; 32] = key
+                .as_bytes()
+                .try_into()
+                .map_err(|_| new_error(ErrorKind::InvalidEddsaKey))?;
+            Ok(Box::new(Ed25519Verifier(
+                VerifyingKey::from_bytes(bytes)
+                    .map_err(|_| new_error(ErrorKind::InvalidEddsaKey))?,
+            )))
+        }
         _ => Err(new_error(ErrorKind::InvalidAlgorithm)),
     }
 }
 
 fn install_hmac_jwt_provider() {
-    let _ = HMAC_ONLY_JWT_PROVIDER.install_default();
+    let _ = FLARE_JWT_PROVIDER.install_default();
+}
+
+/// Decode PEM directly or a base64-encoded PEM/DER document. Never include key material in errors.
+fn key_document(material: &str) -> Result<Vec<u8>> {
+    if material.trim_start().starts_with("-----BEGIN ") {
+        Ok(material.as_bytes().to_vec())
+    } else {
+        STANDARD
+            .decode(material.trim())
+            .map_err(|_| anyhow!("invalid base64 key document"))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct AudienceClaims {
+    #[serde(flatten)]
+    claims: TokenClaims,
+    aud: String,
 }
 
 /// JWT claims used for access tokens
@@ -144,15 +213,16 @@ pub const TOKEN_USE_CONTROL: &str = "control";
 /// 核 admin-gateway 管理令牌的 `token_use` 取值:校验后派生 `admin:*` scope。
 pub const TOKEN_USE_ADMIN: &str = "admin";
 
-/// Stateless token service backed by HMAC (HS256)
+/// Token service using an explicit HS256 or Ed25519 key. Public-key instances cannot sign.
 pub struct TokenService {
     secret: String,
     issuer: String,
     ttl: Duration,
     /// 刷新令牌有效期（长效）。默认 30 天，可经 `with_refresh_ttl` 配置。
     refresh_ttl: Duration,
-    encoding_key: EncodingKey,
+    encoding_key: Option<EncodingKey>,
     decoding_key: DecodingKey,
+    algorithm: Algorithm,
     store: Option<Arc<dyn TokenStore>>,
 }
 
@@ -173,10 +243,159 @@ impl TokenService {
             issuer,
             ttl: Duration::from_secs(ttl_seconds.max(60)),
             refresh_ttl: Duration::from_secs(DEFAULT_REFRESH_TTL_SECS),
-            encoding_key,
+            encoding_key: Some(encoding_key),
             decoding_key,
+            algorithm: Algorithm::HS256,
             store: None,
         }
+    }
+
+    /// Console/internal issuer. Accept PKCS#8 PEM, base64 PEM or base64 DER.
+    pub fn from_ed25519_private_key(
+        material: &str,
+        issuer: impl Into<String>,
+        ttl_seconds: u64,
+    ) -> Result<Self> {
+        install_hmac_jwt_provider();
+        let document = key_document(material)?;
+        let key = if document.starts_with(b"-----BEGIN ") {
+            SigningKey::from_pkcs8_pem(
+                std::str::from_utf8(&document).map_err(|_| anyhow!("invalid key encoding"))?,
+            )
+        } else {
+            SigningKey::from_pkcs8_der(&document)
+        }
+        .map_err(|_| anyhow!("invalid Ed25519 private key"))?;
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let der = key
+            .to_pkcs8_der()
+            .map_err(|_| anyhow!("invalid Ed25519 private key"))?;
+        Ok(Self {
+            secret: String::new(),
+            issuer: issuer.into(),
+            ttl: Duration::from_secs(ttl_seconds.max(1)),
+            refresh_ttl: Duration::from_secs(DEFAULT_REFRESH_TTL_SECS),
+            encoding_key: Some(EncodingKey::from_ed_der(der.as_bytes())),
+            decoding_key: DecodingKey::from_ed_der(key.verifying_key().as_bytes()),
+            algorithm: Algorithm::EdDSA,
+            store: None,
+        })
+    }
+
+    /// Data-plane verifier. A public key must never grant signing capability.
+    pub fn from_ed25519_public_key(material: &str, issuer: impl Into<String>) -> Result<Self> {
+        install_hmac_jwt_provider();
+        let document = key_document(material)?;
+        let key = if document.starts_with(b"-----BEGIN ") {
+            VerifyingKey::from_public_key_pem(
+                std::str::from_utf8(&document).map_err(|_| anyhow!("invalid key encoding"))?,
+            )
+        } else {
+            VerifyingKey::from_public_key_der(&document)
+        }
+        .map_err(|_| anyhow!("invalid Ed25519 public key"))?;
+        Ok(Self {
+            secret: String::new(),
+            issuer: issuer.into(),
+            ttl: Duration::from_secs(60),
+            refresh_ttl: Duration::from_secs(DEFAULT_REFRESH_TTL_SECS),
+            encoding_key: None,
+            decoding_key: DecodingKey::from_ed_der(key.as_bytes()),
+            algorithm: Algorithm::EdDSA,
+            store: None,
+        })
+    }
+
+    /// Ed25519 tokens always carry an explicit audience and use.
+    pub fn generate_with_ed25519(
+        &self,
+        subject: &str,
+        tenant_id: Option<&str>,
+        token_use: &str,
+        aud: &str,
+    ) -> Result<String> {
+        if self.algorithm != Algorithm::EdDSA
+            || subject.is_empty()
+            || token_use.is_empty()
+            || aud.is_empty()
+        {
+            return Err(anyhow!(
+                "Ed25519 issuer, subject, token use and audience are required"
+            ));
+        }
+        let key = self
+            .encoding_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("public-key verifier cannot sign tokens"))?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize;
+        let claims = AudienceClaims {
+            aud: aud.to_owned(),
+            claims: TokenClaims {
+                sub: subject.to_owned(),
+                iss: self.issuer.clone(),
+                iat: now,
+                exp: now + self.ttl.as_secs() as usize,
+                jti: Uuid::new_v4().to_string(),
+                device_id: None,
+                tenant_id: tenant_id.map(str::to_owned),
+                token_use: Some(token_use.to_owned()),
+            },
+        };
+        let token = encode(&Header::new(Algorithm::EdDSA), &claims, key)?;
+        if let Some(store) = self.store.as_ref() {
+            store.register(subject, &claims.claims.jti, self.ttl)?;
+        }
+        Ok(token)
+    }
+
+    pub fn validate_ed25519_with_use(
+        &self,
+        token: &str,
+        expected_use: &str,
+        aud: &str,
+    ) -> Result<TokenClaims> {
+        if self.algorithm != Algorithm::EdDSA || expected_use.is_empty() || aud.is_empty() {
+            return Err(anyhow!(
+                "Ed25519 verifier, token use and audience are required"
+            ));
+        }
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&self.issuer]);
+        validation.set_audience(&[aud]);
+        validation.set_required_spec_claims(&["exp", "iat", "iss", "sub", "aud"]);
+        validation.leeway = 0;
+        let claims = decode::<AudienceClaims>(token, &self.decoding_key, &validation)?
+            .claims
+            .claims;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize;
+        if claims.token_use.as_deref() != Some(expected_use)
+            || claims.sub.is_empty()
+            || claims.jti.is_empty()
+            || claims.iat > now
+            || claims.exp <= now
+            || claims.exp <= claims.iat
+        {
+            return Err(anyhow!(
+                "invalid token purpose, identity or validity interval"
+            ));
+        }
+        if let Some(store) = self.store.as_ref()
+            && store.is_revoked(&claims.jti)?
+        {
+            return Err(anyhow!("token revoked"));
+        }
+        Ok(claims)
+    }
+
+    fn hmac_encoding_key(&self) -> Result<&EncodingKey> {
+        if self.algorithm != Algorithm::HS256 {
+            return Err(anyhow!(
+                "Ed25519 requires an explicit audience and token use"
+            ));
+        }
+        self.encoding_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("signing key missing"))
     }
 
     /// Attach an external token store (e.g. Redis)
@@ -250,7 +469,7 @@ impl TokenService {
             token_use: token_use.map(|v| v.to_string()),
         };
 
-        let token = encode(&Header::default(), &claims, &self.encoding_key)
+        let token = encode(&Header::default(), &claims, self.hmac_encoding_key()?)
             .map_err(|err| anyhow!("failed to encode token: {err}"))?;
 
         if let Some(store) = self.store.as_ref() {
@@ -283,7 +502,7 @@ impl TokenService {
             tenant_id: tenant_id.map(|v| v.to_string()),
             token_use: Some(TOKEN_USE_REFRESH.to_string()),
         };
-        let token = encode(&Header::default(), &claims, &self.encoding_key)
+        let token = encode(&Header::default(), &claims, self.hmac_encoding_key()?)
             .map_err(|err| anyhow!("failed to encode refresh token: {err}"))?;
         if let Some(store) = self.store.as_ref() {
             store.register(&claims.sub, &claims.jti, self.refresh_ttl)?;
@@ -417,6 +636,194 @@ impl TokenClaims {
 #[cfg(test)]
 mod tests {
     use super::TokenService;
+    use super::*;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+
+    fn ed_services() -> (TokenService, TokenService) {
+        let key = SigningKey::from_bytes(&[42; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        (
+            TokenService::from_ed25519_private_key(&private, "test-issuer", 60).unwrap(),
+            TokenService::from_ed25519_public_key(&public, "test-issuer").unwrap(),
+        )
+    }
+
+    fn custom_ed_token(
+        service: &TokenService,
+        update: impl FnOnce(&mut serde_json::Value),
+    ) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut claims = serde_json::json!({"sub":"employee-7", "iss":"test-issuer", "iat":now, "exp":now+60,
+            "jti":"test-id", "tenant_id":"env-a", "token_use":"control", "aud":"flare-internal"});
+        update(&mut claims);
+        encode(
+            &Header::new(Algorithm::EdDSA),
+            &claims,
+            service.encoding_key.as_ref().unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ed25519_roundtrip_preserves_actor_and_tenant() {
+        let (issuer, verifier) = ed_services();
+        let token = issuer
+            .generate_with_ed25519("employee-7", Some("env-a"), "control", "flare-internal")
+            .unwrap();
+        let claims = verifier
+            .validate_ed25519_with_use(&token, "control", "flare-internal")
+            .unwrap();
+        assert_eq!(claims.sub, "employee-7");
+        assert_eq!(claims.tenant_id.as_deref(), Some("env-a"));
+        assert_eq!(claims.exp - claims.iat, 60);
+        assert_eq!(
+            jsonwebtoken::decode_header(&token).unwrap().alg,
+            Algorithm::EdDSA
+        );
+    }
+
+    #[test]
+    fn ed25519_rejects_wrong_audience_use_issuer_and_key() {
+        let (issuer, verifier) = ed_services();
+        let token = issuer
+            .generate_with_ed25519("employee", None, "control", "flare-internal")
+            .unwrap();
+        assert!(
+            verifier
+                .validate_ed25519_with_use(&token, "control", "other-aud")
+                .is_err()
+        );
+        assert!(
+            verifier
+                .validate_ed25519_with_use(&token, "access", "flare-internal")
+                .is_err()
+        );
+        let wrong_issuer = custom_ed_token(&issuer, |c| c["iss"] = "attacker".into());
+        assert!(
+            verifier
+                .validate_ed25519_with_use(&wrong_issuer, "control", "flare-internal")
+                .is_err()
+        );
+        let other_key = SigningKey::from_bytes(&[43; 32])
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let other = TokenService::from_ed25519_public_key(&other_key, "test-issuer").unwrap();
+        assert!(
+            other
+                .validate_ed25519_with_use(&token, "control", "flare-internal")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ed25519_rejects_expired_future_and_missing_claims_without_leeway() {
+        let (issuer, verifier) = ed_services();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for field in ["exp", "iat", "iss", "sub", "aud", "token_use", "jti"] {
+            let token = custom_ed_token(&issuer, |c| {
+                c.as_object_mut().unwrap().remove(field);
+            });
+            assert!(
+                verifier
+                    .validate_ed25519_with_use(&token, "control", "flare-internal")
+                    .is_err(),
+                "accepted missing {field}"
+            );
+        }
+        for exp in [now - 1, now] {
+            let token = custom_ed_token(&issuer, |c| {
+                c["iat"] = (now - 60).into();
+                c["exp"] = exp.into();
+            });
+            assert!(
+                verifier
+                    .validate_ed25519_with_use(&token, "control", "flare-internal")
+                    .is_err()
+            );
+        }
+        let token = custom_ed_token(&issuer, |c| c["iat"] = (now + 30).into());
+        assert!(
+            verifier
+                .validate_ed25519_with_use(&token, "control", "flare-internal")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ed25519_rejects_payload_tampering_and_hmac_confusion() {
+        let (issuer, verifier) = ed_services();
+        let token = issuer
+            .generate_with_ed25519("employee", None, "control", "flare-internal")
+            .unwrap();
+        let mut parts: Vec<String> = token.split('.').map(str::to_owned).collect();
+        parts[1] =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"sub":"attacker"}"#);
+        assert!(
+            verifier
+                .validate_ed25519_with_use(&parts.join("."), "control", "flare-internal")
+                .is_err()
+        );
+        let hmac = TokenService::new("test-secret", "test-issuer", 60)
+            .generate_token_with_use(
+                "attacker",
+                None,
+                None,
+                Duration::from_secs(60),
+                Some("control"),
+            )
+            .unwrap();
+        assert!(
+            verifier
+                .validate_ed25519_with_use(&hmac, "control", "flare-internal")
+                .is_err()
+        );
+        assert!(
+            verifier
+                .generate_with_ed25519("employee", None, "control", "flare-internal")
+                .is_err()
+        );
+        assert!(issuer.generate_token("employee", None, None).is_err());
+        assert!(issuer.validate_token(&hmac).is_err());
+    }
+
+    #[test]
+    fn ed25519_accepts_base64_key_documents_and_rejects_malformed_keys() {
+        let key = SigningKey::from_bytes(&[42; 32]);
+        let private = STANDARD.encode(key.to_pkcs8_der().unwrap().as_bytes());
+        let public = STANDARD.encode(
+            key.verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
+        );
+        let issuer = TokenService::from_ed25519_private_key(&private, "test-issuer", 60).unwrap();
+        let verifier = TokenService::from_ed25519_public_key(&public, "test-issuer").unwrap();
+        let token = issuer
+            .generate_with_ed25519("employee", None, "control", "flare-internal")
+            .unwrap();
+        assert!(
+            verifier
+                .validate_ed25519_with_use(&token, "control", "flare-internal")
+                .is_ok()
+        );
+        for material in ["", "not-base64", "c2hvcnQ="] {
+            assert!(TokenService::from_ed25519_private_key(material, "test", 60).is_err());
+            assert!(TokenService::from_ed25519_public_key(material, "test").is_err());
+        }
+        assert!(
+            hmac_verifier_factory(&Algorithm::EdDSA, &DecodingKey::from_ed_der(&[0; 4])).is_err()
+        );
+    }
 
     #[test]
     fn hs256_token_roundtrip_uses_hmac_provider() {
