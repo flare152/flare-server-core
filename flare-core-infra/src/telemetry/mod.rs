@@ -4,10 +4,68 @@
 //! 需要端到端 trace 时调用 [init_tracing_subscriber] 并传入 [OtlpTracingOptions]。
 
 use std::error::Error;
+use std::fmt as std_fmt;
+use std::str::FromStr;
 
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    EnvFilter, Layer, fmt, layer::SubscriberExt, registry::LookupSpan, util::SubscriberInitExt,
+};
 
 type TelemetryInitResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+/// stdout 日志行格式。
+///
+/// `Json` 每个事件一行 JSON（字段平铺、带当前 span），供 Vector/Promtail 等采集器直接解析；
+/// 与 OTLP trace exporter 可同时启用，二者是同一个 subscriber 上的两个 layer。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+impl LogFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Json => "json",
+        }
+    }
+}
+
+impl std_fmt::Display for LogFormat {
+    fn fmt(&self, f: &mut std_fmt::Formatter<'_>) -> std_fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 未知格式名。显式配置写错时应拒绝启动，而不是悄悄退回文本格式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownLogFormat(pub String);
+
+impl std_fmt::Display for UnknownLogFormat {
+    fn fmt(&self, f: &mut std_fmt::Formatter<'_>) -> std_fmt::Result {
+        write!(
+            f,
+            "unknown log format `{}` (expected `text` or `json`)",
+            self.0
+        )
+    }
+}
+
+impl Error for UnknownLogFormat {}
+
+impl FromStr for LogFormat {
+    type Err = UnknownLogFormat;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "text" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            _ => Err(UnknownLogFormat(value.to_string())),
+        }
+    }
+}
 
 /// 与典型 YAML/TOML 日志段对齐的 fmt 层选项（不依赖任何应用配置类型）
 #[derive(Debug, Clone)]
@@ -18,6 +76,7 @@ pub struct LoggingSubscriberOptions {
     pub with_file: bool,
     pub with_line_number: bool,
     pub with_ansi: Option<bool>,
+    pub format: LogFormat,
 }
 
 /// OTLP trace exporter 配置。
@@ -49,6 +108,7 @@ impl Default for LoggingSubscriberOptions {
             with_file: true,
             with_line_number: true,
             with_ansi: None,
+            format: LogFormat::Text,
         }
     }
 }
@@ -68,6 +128,28 @@ fn default_env_filter(app_level: &str) -> EnvFilter {
 fn stdout_is_terminal() -> bool {
     use std::io::IsTerminal;
     std::io::stdout().is_terminal()
+}
+
+/// 按选项构造 stdout fmt 层。JSON 永不带 ANSI 转义，否则采集端拿到的是被颜色码污染的字段。
+fn fmt_layer<S>(opts: &LoggingSubscriberOptions, use_ansi: bool) -> Box<dyn Layer<S> + Send + Sync>
+where
+    S: tracing::Subscriber + for<'span> LookupSpan<'span>,
+{
+    let layer = fmt::layer()
+        .with_target(opts.with_target)
+        .with_thread_ids(opts.with_thread_ids)
+        .with_file(opts.with_file)
+        .with_line_number(opts.with_line_number);
+    match opts.format {
+        LogFormat::Text => layer.with_ansi(use_ansi).boxed(),
+        LogFormat::Json => layer
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_ansi(false)
+            .boxed(),
+    }
 }
 
 /// 安装全局 fmt subscriber：`log` crate 事件经 `tracing-log` 汇入同一流。
@@ -97,15 +179,9 @@ pub fn init_tracing_subscriber(
     if let Some(otlp) = otlp.filter(|options| options.enabled()) {
         init_subscriber_with_otlp(&opts, env_filter, use_ansi, otlp)?;
     } else {
-        let fmt_layer = fmt::layer()
-            .with_ansi(use_ansi)
-            .with_target(opts.with_target)
-            .with_thread_ids(opts.with_thread_ids)
-            .with_file(opts.with_file)
-            .with_line_number(opts.with_line_number);
         let _ = tracing_subscriber::registry()
             .with(env_filter)
-            .with(fmt_layer)
+            .with(fmt_layer(&opts, use_ansi))
             .try_init();
     }
 
@@ -138,16 +214,10 @@ fn init_subscriber_with_otlp(
     let tracer = provider.tracer(otlp.service_name.trim().to_string());
     opentelemetry::global::set_tracer_provider(provider);
 
-    let fmt_layer = fmt::layer()
-        .with_ansi(use_ansi)
-        .with_target(opts.with_target)
-        .with_thread_ids(opts.with_thread_ids)
-        .with_file(opts.with_file)
-        .with_line_number(opts.with_line_number);
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
     let _ = tracing_subscriber::registry()
         .with(env_filter)
-        .with(fmt_layer)
+        .with(fmt_layer(opts, use_ansi))
         .with(otel_layer)
         .try_init();
 
@@ -161,15 +231,9 @@ fn init_subscriber_with_otlp(
     use_ansi: bool,
     otlp: &OtlpTracingOptions,
 ) -> TelemetryInitResult<()> {
-    let fmt_layer = fmt::layer()
-        .with_ansi(use_ansi)
-        .with_target(opts.with_target)
-        .with_thread_ids(opts.with_thread_ids)
-        .with_file(opts.with_file)
-        .with_line_number(opts.with_line_number);
     let _ = tracing_subscriber::registry()
         .with(env_filter)
-        .with(fmt_layer)
+        .with(fmt_layer(opts, use_ansi))
         .try_init();
     tracing::warn!(
         service_name = %otlp.service_name,
@@ -177,4 +241,89 @@ fn init_subscriber_with_otlp(
         "OTLP tracing requested but flare-core-infra was built without the `otel` feature"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_format_parses_known_names_case_insensitively() {
+        assert_eq!("text".parse::<LogFormat>(), Ok(LogFormat::Text));
+        assert_eq!(" JSON ".parse::<LogFormat>(), Ok(LogFormat::Json));
+        assert_eq!(LogFormat::default(), LogFormat::Text);
+    }
+
+    #[test]
+    fn unknown_log_format_is_rejected_not_defaulted() {
+        let error = "logfmt".parse::<LogFormat>().expect_err("must reject");
+        assert!(error.to_string().contains("logfmt"));
+        assert!("".parse::<LogFormat>().is_err());
+    }
+
+    #[test]
+    fn json_layer_writes_one_parseable_object_per_event() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("buffer lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let opts = LoggingSubscriberOptions {
+            format: LogFormat::Json,
+            with_ansi: Some(true),
+            ..LoggingSubscriberOptions::default()
+        };
+        // 与 fmt_layer 相同的 JSON 设置，只把输出换成内存缓冲以便断言。
+        let layer = fmt::layer()
+            .with_target(opts.with_target)
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_ansi(false)
+            .with_writer(move || writer.clone());
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("send", tenant_id = "t1");
+            let _entered = span.enter();
+            tracing::info!(message_id = "m1", "persisted");
+        });
+
+        let output =
+            String::from_utf8(buffer.0.lock().expect("buffer lock").clone()).expect("utf8 output");
+        let line = output.lines().next().expect("one event line");
+        assert!(
+            !line.contains('\u{1b}'),
+            "JSON logs must not carry ANSI escapes"
+        );
+        let value: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
+        assert_eq!(value["message"], "persisted");
+        assert_eq!(value["message_id"], "m1");
+        assert_eq!(value["span"]["tenant_id"], "t1");
+        assert_eq!(value["level"], "INFO");
+    }
+
+    #[test]
+    fn fmt_layer_builds_for_both_formats() {
+        for format in [LogFormat::Text, LogFormat::Json] {
+            let opts = LoggingSubscriberOptions {
+                format,
+                ..LoggingSubscriberOptions::default()
+            };
+            let subscriber = tracing_subscriber::registry().with(fmt_layer(&opts, false));
+            tracing::subscriber::with_default(subscriber, || tracing::debug!("smoke"));
+        }
+    }
 }

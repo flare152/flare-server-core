@@ -141,7 +141,8 @@ pub use flare_core_infra::kv::{KvBackend, KvStore};
 
 // Common telemetry types.
 pub use flare_core_infra::telemetry::{
-    LoggingSubscriberOptions, OtlpTracingOptions, init_fmt_subscriber, init_tracing_subscriber,
+    LogFormat, LoggingSubscriberOptions, OtlpTracingOptions, UnknownLogFormat, init_fmt_subscriber,
+    init_tracing_subscriber,
 };
 
 // Runtime types.
