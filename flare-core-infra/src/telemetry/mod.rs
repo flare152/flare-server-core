@@ -6,6 +6,7 @@
 use std::error::Error;
 use std::fmt as std_fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use tracing_subscriber::{
     EnvFilter, Layer, fmt, layer::SubscriberExt, registry::LookupSpan, util::SubscriberInitExt,
@@ -188,6 +189,25 @@ pub fn init_tracing_subscriber(
     Ok(())
 }
 
+/// 进程内唯一的 OTLP provider；[shutdown_tracing] 用它在退出前导出最后一批 span。
+#[cfg(feature = "otel")]
+static TRACER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
+    std::sync::OnceLock::new();
+
+/// 导出尚在批处理队列中的 span 并停止 OTLP exporter；未启用 OTLP 时直接返回。
+///
+/// 批处理器默认每 5 秒导出一次，进程退出前不调用会丢掉最后一批 span。
+/// 必须在 tokio 运行时仍存活时调用（exporter 的 gRPC 通道依赖它）。
+pub fn shutdown_tracing(timeout: Duration) -> TelemetryInitResult<()> {
+    #[cfg(feature = "otel")]
+    if let Some(provider) = TRACER_PROVIDER.get() {
+        provider.shutdown_with_timeout(timeout)?;
+    }
+    #[cfg(not(feature = "otel"))]
+    let _ = timeout;
+    Ok(())
+}
+
 #[cfg(feature = "otel")]
 fn init_subscriber_with_otlp(
     opts: &LoggingSubscriberOptions,
@@ -212,6 +232,7 @@ fn init_subscriber_with_otlp(
         .with_batch_exporter(exporter)
         .build();
     let tracer = provider.tracer(otlp.service_name.trim().to_string());
+    let _ = TRACER_PROVIDER.set(provider.clone());
     opentelemetry::global::set_tracer_provider(provider);
 
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);

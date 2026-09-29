@@ -1,13 +1,14 @@
 //! OTLP trace 导出端到端：本地 gRPC 收集端 + 真实全局 subscriber。
 //!
 //! 独立测试二进制，全局 subscriber 只在本进程安装一次。证明 JSON 日志与 OTLP 同时开启时，
-//! span 确实经 BatchSpanProcessor 送达收集端，且 resource 带配置的服务名。
+//! span 确实送达收集端、resource 带配置的服务名，且 `shutdown_tracing` 不等批处理周期即完成导出。
 #![cfg(feature = "otel")]
 
 use std::time::Duration;
 
 use flare_core_infra::telemetry::{
     LogFormat, LoggingSubscriberOptions, OtlpTracingOptions, init_tracing_subscriber,
+    shutdown_tracing,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
@@ -83,8 +84,10 @@ async fn spans_reach_otlp_collector_with_json_logs_enabled() {
         tracing::info!("inside probe span");
     }
 
-    // BatchSpanProcessor 默认 5 秒一批；给足两个周期。
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    // 不等 5 秒的批处理周期：shutdown_tracing 必须立即把队列里的 span 导出。
+    // 批处理线程通过 tokio 通道发 gRPC，放到阻塞线程里调用以免占住运行时。
+    let flushed = tokio::task::spawn_blocking(|| shutdown_tracing(Duration::from_secs(5)));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let mut names = Vec::new();
     let mut services = Vec::new();
     while !names.iter().any(|name| name == "otlp_probe_span") {
@@ -99,5 +102,9 @@ async fn spans_reach_otlp_collector_with_json_logs_enabled() {
         services.iter().any(|name| name == "otlp-probe"),
         "{services:?}"
     );
+    flushed
+        .await
+        .expect("shutdown task joins")
+        .expect("exporter shut down cleanly");
     server.abort();
 }

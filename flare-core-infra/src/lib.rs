@@ -19,4 +19,6 @@ pub use auth::{
 };
 
 // Telemetry re-exports.
-pub use telemetry::{LogFormat, LoggingSubscriberOptions, UnknownLogFormat, init_fmt_subscriber};
+pub use telemetry::{
+    LogFormat, LoggingSubscriberOptions, UnknownLogFormat, init_fmt_subscriber, shutdown_tracing,
+};
