@@ -4,6 +4,7 @@ use flare_core_base::context::Ctx;
 use tonic::{Request, Status};
 
 use crate::grpc::middleware::context::get_context;
+use crate::grpc::middleware::signed_context::VerifiedContext;
 use crate::grpc::utils::metadata_codec::decode_context_from_metadata;
 
 // -----------------------------------------------------------------------------
@@ -13,6 +14,13 @@ use crate::grpc::utils::metadata_codec::decode_context_from_metadata;
 /// 合并 extensions（ContextLayer 注入）与 metadata 解码结果，优先保留非空的 user/tenant。
 fn merge_request_context<T>(req: &Request<T>) -> Option<Ctx> {
     let from_extensions = get_context(req).cloned();
+    // A verified (including explicitly anonymous) context is authoritative.
+    // Legacy metadata is never allowed to fill in its missing identity fields.
+    if let Some(ctx) = from_extensions.as_ref()
+        && ctx.get_data::<VerifiedContext>().is_some()
+    {
+        return from_extensions;
+    }
     let from_metadata = decode_context_from_metadata(req.metadata());
 
     match (from_extensions, from_metadata) {

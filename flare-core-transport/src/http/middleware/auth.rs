@@ -64,7 +64,7 @@ pub async fn auth_middleware(
     }
 
     // 4. 使用 TokenService 验证 JWT
-    match token_service.validate_token(token) {
+    match token_service.validate_access_token(token) {
         Ok(claims) => {
             debug!(
                 user_id = %claims.sub,
@@ -147,7 +147,7 @@ pub async fn optional_auth_middleware(
     };
 
     // 3. 使用 TokenService 验证 JWT
-    match token_service.validate_token(token) {
+    match token_service.validate_access_token(token) {
         Ok(claims) => {
             debug!(
                 user_id = %claims.sub,

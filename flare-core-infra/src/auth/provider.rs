@@ -147,10 +147,19 @@ impl TokenValidator for CoreJwtTokenValidator {
         &self,
         request: TokenValidationRequest,
     ) -> std::result::Result<AuthenticatedPrincipal, AuthError> {
-        self.validator
+        let claims = self
+            .validator
             .validate_token(&request.token)
-            .map(AuthenticatedPrincipal::from_token_claims)
-            .map_err(|err| AuthError::InvalidToken(err.to_string()))
+            .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
+        // This validator protects normal user API routes. A refresh or control
+        // token has a valid signature but must never become a User principal.
+        // Legacy access tokens omit token_use; preserve that documented case.
+        if !matches!(claims.token_use.as_deref(), None | Some("access")) {
+            // Forbidden is terminal in ChainedTokenValidator: do not forward a
+            // locally verified refresh/control token to an opaque-token Hook.
+            return Err(AuthError::Forbidden("token is not an access token".into()));
+        }
+        Ok(AuthenticatedPrincipal::from_token_claims(claims))
     }
 }
 
@@ -546,5 +555,50 @@ mod tests {
         assert_eq!(principal.user_id, "user-a");
         assert_eq!(principal.tenant_id.as_deref(), Some("tenant-a"));
         assert_eq!(principal.device_id.as_deref(), Some("device-a"));
+    }
+
+    #[tokio::test]
+    async fn core_jwt_validator_rejects_refresh_and_control_tokens() {
+        let token_service = Arc::new(TokenService::new("secret", "flare-im-core", 3600));
+        let refresh = token_service
+            .generate_refresh_token("user-a", Some("device-a"), Some("tenant-a"))
+            .expect("refresh token");
+        let control = token_service
+            .generate_token_with_use(
+                "operator-a",
+                None,
+                Some("tenant-a"),
+                Duration::from_secs(60),
+                Some("control"),
+            )
+            .expect("control token");
+        let validator = CoreJwtTokenValidator::new(CompositeTokenValidator::new(token_service));
+        let chain = ChainedTokenValidator::new(vec![Arc::new(validator.clone()), stub(&refresh)]);
+        assert!(matches!(
+            chain
+                .validate(TokenValidationRequest {
+                    token: refresh.clone(),
+                    trace_id: None,
+                    request_id: None,
+                    path: None,
+                    method: None,
+                })
+                .await,
+            Err(AuthError::Forbidden(_))
+        ));
+        for token in [refresh, control] {
+            assert!(matches!(
+                validator
+                    .validate(TokenValidationRequest {
+                        token,
+                        trace_id: None,
+                        request_id: None,
+                        path: None,
+                        method: None,
+                    })
+                    .await,
+                Err(AuthError::Forbidden(_))
+            ));
+        }
     }
 }

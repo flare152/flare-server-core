@@ -32,6 +32,7 @@
 
 pub mod context;
 pub mod interceptor;
+pub mod signed_context;
 
 // 从 utils 导入编解码功能
 pub use crate::grpc::utils::{decode_context_from_metadata, encode_context_to_metadata};
@@ -44,6 +45,7 @@ pub use interceptor::{
 
 // Context 集成
 pub use context::{request_with_context, set_context_metadata};
+pub use signed_context::{SignedContextInterceptor, set_signed_context_token};
 
 use flare_core_base::error::Result;
 use std::time::Duration;

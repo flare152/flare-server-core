@@ -153,6 +153,14 @@ impl TokenIssuer for CoreJwtTokenIssuer {
             .service
             .decode_claims_allow_expired(current_token)
             .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
+        // Only legacy access tokens are eligible for the grace-period path.
+        // An expired/revoked refresh token must not fall through here, and a
+        // service/control token must never be exchanged for a user access token.
+        if !matches!(claims.token_use.as_deref(), None | Some("access")) {
+            return Err(AuthError::Forbidden(
+                "token is not an access token eligible for refresh".into(),
+            ));
+        }
         let exp = claims.exp as u64;
         if exp + self.refresh_grace.as_secs() < now {
             return Err(AuthError::InvalidToken(format!(
@@ -459,19 +467,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn refresh_grace_never_converts_control_or_expired_refresh_tokens() {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
+        let secret = "a-strong-shared-secret-with-more-than-32-bytes!";
+        let svc = Arc::new(TokenService::new(secret, "flare-im-core", 3600));
+        let issuer = CoreJwtTokenIssuer::new(svc.clone(), Duration::from_secs(1000));
+        let control = svc
+            .generate_token_with_use(
+                "operator",
+                None,
+                Some("tenant-a"),
+                Duration::from_secs(60),
+                Some("control"),
+            )
+            .unwrap();
+        assert!(matches!(
+            issuer.refresh(&control).await,
+            Err(AuthError::Forbidden(_))
+        ));
+
+        let now = CoreJwtTokenIssuer::now_secs();
+        let expired_refresh = encode(
+            &Header::default(),
+            &super::super::TokenClaims {
+                sub: "user-a".into(),
+                iss: "flare-im-core".into(),
+                exp: (now - 100) as usize,
+                iat: (now - 200) as usize,
+                jti: "expired-refresh".into(),
+                device_id: None,
+                tenant_id: Some("tenant-a".into()),
+                token_use: Some("refresh".into()),
+            },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        assert!(matches!(
+            issuer.refresh(&expired_refresh).await,
+            Err(AuthError::Forbidden(_))
+        ));
+    }
+
     #[derive(Default)]
     struct MemStore {
         revoked: Mutex<Vec<String>>,
     }
     impl super::super::TokenStore for MemStore {
-        fn register(&self, _user_id: &str, _jti: &str, _ttl: Duration) -> Result<()> {
+        fn register(
+            &self,
+            _tenant_id: &str,
+            _user_id: &str,
+            _jti: &str,
+            _ttl: Duration,
+        ) -> Result<()> {
             Ok(())
         }
-        fn revoke(&self, _user_id: &str, jti: &str, _ttl: Duration) -> Result<()> {
+        fn revoke(
+            &self,
+            _tenant_id: &str,
+            _user_id: &str,
+            jti: &str,
+            _ttl: Duration,
+        ) -> Result<()> {
             self.revoked.lock().unwrap().push(jti.to_string());
             Ok(())
         }
-        fn revoke_user(&self, _user_id: &str, _ttl: Duration) -> Result<()> {
+        fn revoke_user(&self, _tenant_id: &str, _user_id: &str, _ttl: Duration) -> Result<()> {
             Ok(())
         }
         fn is_revoked(&self, jti: &str) -> Result<bool> {

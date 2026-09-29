@@ -14,7 +14,8 @@ pub use interceptor::{
 
 #[cfg(feature = "grpc-middleware")]
 pub use middleware::{
-    ContextLayer, ContextService, RateLimitLayer, RetryLayer, TimeoutLayer, extract_actor_id,
-    extract_context, extract_request_id, extract_tenant_id, extract_user_id, get_context,
-    require_actor_id, require_request_id, require_tenant_id, require_user_id,
+    ContextLayer, ContextService, RateLimitLayer, RetryLayer, SignedContextLayer,
+    SignedContextService, TimeoutLayer, VerifiedContext, extract_actor_id, extract_context,
+    extract_request_id, extract_tenant_id, extract_user_id, get_context, require_actor_id,
+    require_request_id, require_tenant_id, require_user_id,
 };

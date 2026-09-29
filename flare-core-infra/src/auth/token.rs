@@ -213,6 +213,214 @@ pub const TOKEN_USE_CONTROL: &str = "control";
 /// 核 admin-gateway 管理令牌的 `token_use` 取值:校验后派生 `admin:*` scope。
 pub const TOKEN_USE_ADMIN: &str = "admin";
 
+/// Audience, issuer and purpose are fixed for cell-internal gRPC identity.
+pub const INTERNAL_CONTEXT_ISSUER: &str = "flare-internal";
+pub const INTERNAL_CONTEXT_AUDIENCE: &str = "flare-internal";
+pub const TOKEN_USE_INTERNAL_CONTEXT: &str = "internal_context";
+pub const INTERNAL_CONTEXT_TTL_SECS: u64 = 60;
+
+/// A business-neutral actor category carried in the signed internal context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignedActorType {
+    User,
+    Service,
+    TenantAdmin,
+    System,
+    Guest,
+}
+
+/// Identity selected by a trusted caller after it authenticates the original request.
+/// The signer sets issuer, audience, purpose, timestamps and nonce itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedContextIdentity {
+    pub actor_type: SignedActorType,
+    pub actor_id: String,
+    pub tenant_id: String,
+    pub roles: Vec<String>,
+    pub credential_id: Option<String>,
+    pub request_id: String,
+}
+
+impl SignedContextIdentity {
+    pub fn new(
+        actor_type: SignedActorType,
+        actor_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+        request_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            actor_type,
+            actor_id: actor_id.into(),
+            tenant_id: tenant_id.into(),
+            roles: Vec::new(),
+            credential_id: None,
+            request_id: request_id.into(),
+        }
+    }
+
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles = roles;
+        self
+    }
+
+    pub fn with_credential_id(mut self, credential_id: impl Into<String>) -> Self {
+        self.credential_id = Some(credential_id.into());
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        fn valid(value: &str, max: usize) -> bool {
+            !value.is_empty()
+                && value.len() <= max
+                && value.trim() == value
+                && !value.chars().any(char::is_control)
+        }
+
+        if !valid(&self.actor_id, 256)
+            || !valid(&self.tenant_id, 256)
+            || !valid(&self.request_id, 128)
+            || self
+                .credential_id
+                .as_deref()
+                .is_some_and(|id| !valid(id, 256))
+            || self.roles.len() > 32
+            || self.roles.iter().any(|role| !valid(role, 128))
+            || (self.actor_type == SignedActorType::Guest && !self.roles.is_empty())
+        {
+            return Err(anyhow!("invalid signed context identity"));
+        }
+        Ok(())
+    }
+}
+
+/// Exact EdDSA wire claims. `jti` supports downstream idempotency/replay tracking;
+/// retry and forwarding deliberately reuse a token within its 60-second validity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedContextClaims {
+    pub sub: String,
+    pub iss: String,
+    pub aud: String,
+    pub token_use: String,
+    pub iat: u64,
+    pub exp: u64,
+    pub jti: String,
+    pub actor_type: SignedActorType,
+    pub actor_id: String,
+    pub tenant_id: String,
+    pub roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    pub request_id: String,
+}
+
+impl SignedContextClaims {
+    fn validate(&self, now: u64) -> Result<()> {
+        SignedContextIdentity {
+            actor_type: self.actor_type,
+            actor_id: self.actor_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            roles: self.roles.clone(),
+            credential_id: self.credential_id.clone(),
+            request_id: self.request_id.clone(),
+        }
+        .validate()?;
+        if self.sub != self.actor_id
+            || self.iss != INTERNAL_CONTEXT_ISSUER
+            || self.aud != INTERNAL_CONTEXT_AUDIENCE
+            || self.token_use != TOKEN_USE_INTERNAL_CONTEXT
+            || Uuid::parse_str(&self.jti).is_err()
+            || self.iat > now
+            || self.exp <= now
+            || self.exp <= self.iat
+            || self.exp - self.iat > INTERNAL_CONTEXT_TTL_SECS
+        {
+            return Err(anyhow!("invalid signed context claims"));
+        }
+        Ok(())
+    }
+}
+
+/// Only a process holding the private key can issue cell-internal identity.
+#[derive(Clone)]
+pub struct SignedContextSigner(Arc<TokenService>);
+
+impl SignedContextSigner {
+    pub fn from_private_key(material: &str) -> Result<Self> {
+        Ok(Self(Arc::new(TokenService::from_ed25519_private_key(
+            material,
+            INTERNAL_CONTEXT_ISSUER,
+            INTERNAL_CONTEXT_TTL_SECS,
+        )?)))
+    }
+
+    pub fn sign(&self, identity: &SignedContextIdentity) -> Result<String> {
+        identity.validate()?;
+        let key = self
+            .0
+            .encoding_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("public-key verifier cannot sign tokens"))?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let claims = SignedContextClaims {
+            sub: identity.actor_id.clone(),
+            iss: INTERNAL_CONTEXT_ISSUER.to_owned(),
+            aud: INTERNAL_CONTEXT_AUDIENCE.to_owned(),
+            token_use: TOKEN_USE_INTERNAL_CONTEXT.to_owned(),
+            iat: now,
+            exp: now + INTERNAL_CONTEXT_TTL_SECS,
+            jti: Uuid::new_v4().to_string(),
+            actor_type: identity.actor_type,
+            actor_id: identity.actor_id.clone(),
+            tenant_id: identity.tenant_id.clone(),
+            roles: identity.roles.clone(),
+            credential_id: identity.credential_id.clone(),
+            request_id: identity.request_id.clone(),
+        };
+        Ok(encode(&Header::new(Algorithm::EdDSA), &claims, key)?)
+    }
+}
+
+/// Public-key-only verifier. Construction never grants signing capability.
+#[derive(Clone)]
+pub struct SignedContextVerifier(Arc<TokenService>);
+
+impl SignedContextVerifier {
+    pub fn from_public_key(material: &str) -> Result<Self> {
+        Ok(Self(Arc::new(TokenService::from_ed25519_public_key(
+            material,
+            INTERNAL_CONTEXT_ISSUER,
+        )?)))
+    }
+
+    pub fn verify(&self, token: &str) -> Result<SignedContextClaims> {
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[INTERNAL_CONTEXT_ISSUER]);
+        validation.set_audience(&[INTERNAL_CONTEXT_AUDIENCE]);
+        validation.set_required_spec_claims(&[
+            "sub",
+            "iss",
+            "aud",
+            "token_use",
+            "iat",
+            "exp",
+            "jti",
+            "actor_type",
+            "actor_id",
+            "tenant_id",
+            "roles",
+            "request_id",
+        ]);
+        validation.leeway = 0;
+        let claims =
+            decode::<SignedContextClaims>(token, &self.0.decoding_key, &validation)?.claims;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        claims.validate(now)?;
+        Ok(claims)
+    }
+}
+
 /// Token service using an explicit HS256 or Ed25519 key. Public-key instances cannot sign.
 pub struct TokenService {
     secret: String,
@@ -343,7 +551,12 @@ impl TokenService {
         };
         let token = encode(&Header::new(Algorithm::EdDSA), &claims, key)?;
         if let Some(store) = self.store.as_ref() {
-            store.register(subject, &claims.claims.jti, self.ttl)?;
+            store.register(
+                tenant_id.unwrap_or("0"),
+                subject,
+                &claims.claims.jti,
+                self.ttl,
+            )?;
         }
         Ok(token)
     }
@@ -473,7 +686,7 @@ impl TokenService {
             .map_err(|err| anyhow!("failed to encode token: {err}"))?;
 
         if let Some(store) = self.store.as_ref() {
-            store.register(&claims.sub, &claims.jti, ttl)?;
+            store.register(tenant_id.unwrap_or("0"), &claims.sub, &claims.jti, ttl)?;
         }
 
         Ok(token)
@@ -505,7 +718,12 @@ impl TokenService {
         let token = encode(&Header::default(), &claims, self.hmac_encoding_key()?)
             .map_err(|err| anyhow!("failed to encode refresh token: {err}"))?;
         if let Some(store) = self.store.as_ref() {
-            store.register(&claims.sub, &claims.jti, self.refresh_ttl)?;
+            store.register(
+                tenant_id.unwrap_or("0"),
+                &claims.sub,
+                &claims.jti,
+                self.refresh_ttl,
+            )?;
         }
         Ok(token)
     }
@@ -550,7 +768,12 @@ impl TokenService {
     /// Revokes one token (no-op without a store).
     pub fn revoke(&self, claims: &TokenClaims, ttl: Duration) -> Result<()> {
         if let Some(store) = self.store.as_ref() {
-            store.revoke(&claims.sub, &claims.jti, ttl)?;
+            store.revoke(
+                claims.tenant_id.as_deref().unwrap_or("0"),
+                &claims.sub,
+                &claims.jti,
+                ttl,
+            )?;
         }
         Ok(())
     }
@@ -561,17 +784,17 @@ impl TokenService {
     }
 
     /// 撤销某用户的全部令牌（无 store 时为空操作）。
-    pub fn revoke_user(&self, user_id: &str, ttl: Duration) -> Result<()> {
+    pub fn revoke_user(&self, tenant_id: &str, user_id: &str, ttl: Duration) -> Result<()> {
         if let Some(store) = self.store.as_ref() {
-            store.revoke_user(user_id, ttl)?;
+            store.revoke_user(tenant_id, user_id, ttl)?;
         }
         Ok(())
     }
 
     /// 发布「踢用户」信号，通知长连接网关关闭该用户活连接（撤销即断）。无 store 时空操作。
-    pub fn publish_kick(&self, user_id: &str) -> Result<()> {
+    pub fn publish_kick(&self, signal: &super::store::KickSignal) -> Result<()> {
         if let Some(store) = self.store.as_ref() {
-            store.publish_kick(user_id)?;
+            store.publish_kick(signal)?;
         }
         Ok(())
     }
@@ -581,6 +804,16 @@ impl TokenService {
         let claims = self.validate_token(token)?;
         if claims.token_use.as_deref() != Some(expected) {
             return Err(anyhow!("token_use mismatch: expected {expected}"));
+        }
+        Ok(claims)
+    }
+
+    /// Validate a normal end-user access token. Older access tokens have no
+    /// `token_use`; refresh/control/admin/internal tokens are never accepted.
+    pub fn validate_access_token(&self, token: &str) -> Result<TokenClaims> {
+        let claims = self.validate_token(token)?;
+        if !matches!(claims.token_use.as_deref(), None | Some("access")) {
+            return Err(anyhow!("token is not an access token"));
         }
         Ok(claims)
     }
@@ -650,6 +883,167 @@ mod tests {
             TokenService::from_ed25519_private_key(&private, "test-issuer", 60).unwrap(),
             TokenService::from_ed25519_public_key(&public, "test-issuer").unwrap(),
         )
+    }
+
+    fn signed_context_services() -> (SignedContextSigner, SignedContextVerifier) {
+        let key = SigningKey::from_bytes(&[52; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        (
+            SignedContextSigner::from_private_key(&private).unwrap(),
+            SignedContextVerifier::from_public_key(&public).unwrap(),
+        )
+    }
+
+    fn changed_signed_context(
+        signer: &SignedContextSigner,
+        update: impl FnOnce(&mut serde_json::Value),
+    ) -> String {
+        let token = signer
+            .sign(&SignedContextIdentity::new(
+                SignedActorType::User,
+                "user-1",
+                "tenant-1",
+                "request-1",
+            ))
+            .unwrap();
+        let payload = token.split('.').nth(1).unwrap();
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap();
+        let mut claims: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        update(&mut claims);
+        encode(
+            &Header::new(Algorithm::EdDSA),
+            &claims,
+            signer.0.encoding_key.as_ref().unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn signed_context_roundtrip_has_typed_actor_and_bounded_lifetime() {
+        let (signer, verifier) = signed_context_services();
+        let identity = SignedContextIdentity::new(
+            SignedActorType::TenantAdmin,
+            "staff-7",
+            "tenant-1",
+            "request-42",
+        )
+        .with_roles(vec!["control".to_owned()])
+        .with_credential_id("credential-9");
+        let token = signer.sign(&identity).unwrap();
+        let claims = verifier.verify(&token).unwrap();
+        assert_eq!(claims.actor_type, SignedActorType::TenantAdmin);
+        assert_eq!(claims.actor_id, "staff-7");
+        assert_eq!(claims.tenant_id, "tenant-1");
+        assert_eq!(claims.roles, vec!["control"]);
+        assert_eq!(claims.credential_id.as_deref(), Some("credential-9"));
+        assert_eq!(claims.request_id, "request-42");
+        assert_eq!(claims.exp - claims.iat, INTERNAL_CONTEXT_TTL_SECS);
+        assert!(Uuid::parse_str(&claims.jti).is_ok());
+        assert_eq!(
+            jsonwebtoken::decode_header(&token).unwrap().alg,
+            Algorithm::EdDSA
+        );
+    }
+
+    #[test]
+    fn signed_context_rejects_wrong_key_purpose_audience_and_tampering() {
+        let (signer, verifier) = signed_context_services();
+        let identity =
+            SignedContextIdentity::new(SignedActorType::User, "user-1", "tenant-1", "request-1");
+        let token = signer.sign(&identity).unwrap();
+        let other_public = SigningKey::from_bytes(&[53; 32])
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        assert!(
+            SignedContextVerifier::from_public_key(&other_public)
+                .unwrap()
+                .verify(&token)
+                .is_err()
+        );
+        for (field, value) in [
+            ("token_use", "control"),
+            ("aud", "other-service"),
+            ("iss", "other-issuer"),
+            ("actor_id", "other-user"),
+        ] {
+            let token = changed_signed_context(&signer, |claims| claims[field] = value.into());
+            assert!(verifier.verify(&token).is_err(), "accepted {field}");
+        }
+        let mut parts: Vec<_> = token.split('.').map(str::to_owned).collect();
+        parts[1] =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"actor_id":"attacker"}"#);
+        assert!(verifier.verify(&parts.join(".")).is_err());
+        let control = signer
+            .0
+            .generate_with_ed25519("staff", Some("tenant-1"), "control", "flare-internal")
+            .unwrap();
+        assert!(verifier.verify(&control).is_err());
+        assert!(verifier.0.encoding_key.is_none());
+    }
+
+    #[test]
+    fn signed_context_rejects_expired_future_overlong_and_missing_claims() {
+        let (signer, verifier) = signed_context_services();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for field in [
+            "sub",
+            "iss",
+            "aud",
+            "token_use",
+            "iat",
+            "exp",
+            "jti",
+            "actor_type",
+            "actor_id",
+            "tenant_id",
+            "roles",
+            "request_id",
+        ] {
+            let token = changed_signed_context(&signer, |claims| {
+                claims.as_object_mut().unwrap().remove(field);
+            });
+            assert!(verifier.verify(&token).is_err(), "accepted missing {field}");
+        }
+        for (iat, exp) in [(now - 60, now), (now + 1, now + 60), (now - 61, now + 1)] {
+            let token = changed_signed_context(&signer, |claims| {
+                claims["iat"] = iat.into();
+                claims["exp"] = exp.into();
+            });
+            assert!(verifier.verify(&token).is_err(), "accepted interval");
+        }
+    }
+
+    #[test]
+    fn signed_context_rejects_invalid_identity_before_issuing() {
+        let (signer, _) = signed_context_services();
+        let base = SignedContextIdentity::new(
+            SignedActorType::Guest,
+            "anonymous",
+            "tenant-1",
+            "request-1",
+        );
+        assert!(signer.sign(&base).is_ok());
+        assert!(
+            signer
+                .sign(&base.clone().with_roles(vec!["control".into()]))
+                .is_err()
+        );
+        let mut missing_tenant = base.clone();
+        missing_tenant.tenant_id.clear();
+        assert!(signer.sign(&missing_tenant).is_err());
+        let mut bad_request = base;
+        bad_request.request_id = "invalid\nheader".to_owned();
+        assert!(signer.sign(&bad_request).is_err());
     }
 
     fn custom_ed_token(
@@ -840,5 +1234,29 @@ mod tests {
         assert_eq!(claims.iss, "flare-im-core");
         assert_eq!(claims.device_id.as_deref(), Some("device-1"));
         assert_eq!(claims.tenant_id.as_deref(), Some("tenant-1"));
+    }
+
+    #[test]
+    fn normal_access_validation_rejects_refresh_and_control_tokens() {
+        let service = TokenService::new("insecure-secret", "flare-im-core", 3600);
+        let access = service
+            .generate_token("user-1", Some("device-1"), Some("tenant-1"))
+            .unwrap();
+        let refresh = service
+            .generate_refresh_token("user-1", Some("device-1"), Some("tenant-1"))
+            .unwrap();
+        let control = service
+            .generate_token_with_use(
+                "operator-1",
+                None,
+                Some("tenant-1"),
+                Duration::from_secs(60),
+                Some("control"),
+            )
+            .unwrap();
+
+        assert!(service.validate_access_token(&access).is_ok());
+        assert!(service.validate_access_token(&refresh).is_err());
+        assert!(service.validate_access_token(&control).is_err());
     }
 }

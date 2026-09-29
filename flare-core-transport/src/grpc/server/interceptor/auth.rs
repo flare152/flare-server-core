@@ -25,7 +25,7 @@ impl AuthInterceptor {
             .ok_or_else(|| Status::unauthenticated("Missing authorization token"))?;
 
         // 验证 token
-        match self.token_service.validate_token(&token) {
+        match self.token_service.validate_access_token(&token) {
             Ok(claims) => {
                 debug!(subject = %claims.sub, "Request authenticated");
                 Ok(req)
