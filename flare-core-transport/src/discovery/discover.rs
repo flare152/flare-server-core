@@ -2,14 +2,16 @@
 //!
 //! 提供 Channel 缓存、P2C 负载均衡和简洁调用接口
 
-use futures::Stream;
-use std::collections::HashMap;
+use futures::{Stream, StreamExt};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
-use tonic::transport::Channel;
+use tonic::transport::channel::Change as ChannelChange;
+use tonic::transport::{Channel, Endpoint};
 use tower::Service;
 use tower::discover::Change;
 
@@ -38,18 +40,31 @@ fn tag_filters_to_map(config: &DiscoveryConfig) -> Option<HashMap<String, String
 #[derive(Clone)]
 pub struct ChannelService {
     channel: Channel,
+    endpoint: Endpoint,
 }
 
 impl ChannelService {
     /// 创建新的 Channel 服务
-    pub fn new(channel: Channel) -> Self {
-        Self { channel }
+    pub fn new(channel: Channel, endpoint: Endpoint) -> Self {
+        Self { channel, endpoint }
     }
 
     /// 获取底层的 Channel
     pub fn channel(&self) -> &Channel {
         &self.channel
     }
+
+    /// The endpoint is retained so a tonic balancing Channel can follow
+    /// discovery insert/remove events instead of pinning one selected node.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum BalancerKey {
+    Fallback,
+    Instance(String),
 }
 
 /// 实现 tower::Service trait
@@ -94,6 +109,9 @@ impl tower::load::Load for ChannelService {
 pub struct ServiceDiscover {
     // 接收 tower::discover::Change 事件的 channel
     rx: mpsc::Receiver<Change<String, ChannelService>>,
+    // Initial instances must not be sent to rx before the consumer exists:
+    // doing so blocks construction once the fixed-size queue fills.
+    initial_changes: VecDeque<Change<String, ChannelService>>,
     // Channel 缓存：instance_id -> ChannelService
     // 注意：这个字段在 ServiceDiscoverUpdater 中使用，但编译器可能检测不到
     #[allow(dead_code)]
@@ -117,6 +135,65 @@ pub struct ServiceDiscoverUpdater {
 }
 
 impl ServiceDiscover {
+    /// Build one clonable tonic Channel whose endpoint set follows discovery.
+    /// A static fallback is used only while discovery has no registered nodes.
+    /// Dropping all Channel clones stops the forwarding task.
+    pub fn into_balance_channel(
+        mut self,
+        fallback: Option<Endpoint>,
+        request_timeout: Duration,
+    ) -> Channel {
+        let (channel, tx) = Channel::balance_channel(64);
+        tokio::spawn(async move {
+            let mut instances = HashSet::new();
+            if let Some(endpoint) = fallback.as_ref()
+                && tx
+                    .send(ChannelChange::Insert(
+                        BalancerKey::Fallback,
+                        endpoint.clone(),
+                    ))
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            loop {
+                tokio::select! {
+                    _ = tx.closed() => break,
+                    event = self.next() => {
+                        let Some(Ok(event)) = event else { break };
+                        match event {
+                            Change::Insert(id, service) => {
+                                let first = instances.is_empty();
+                                if tx.send(ChannelChange::Insert(BalancerKey::Instance(id.clone()), service.endpoint().clone().timeout(request_timeout))).await.is_err() {
+                                    break;
+                                }
+                                instances.insert(id);
+                                if first && fallback.is_some() && tx.send(ChannelChange::Remove(BalancerKey::Fallback)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Change::Remove(id) => {
+                                if instances.remove(&id) {
+                                    if tx.send(ChannelChange::Remove(BalancerKey::Instance(id))).await.is_err() {
+                                        break;
+                                    }
+                                    if instances.is_empty()
+                                        && let Some(endpoint) = fallback.as_ref()
+                                        && tx.send(ChannelChange::Insert(BalancerKey::Fallback, endpoint.clone())).await.is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        channel
+    }
+
     /// 创建新的服务发现器（内部方法）
     ///
     /// 返回 (ServiceDiscover, ServiceDiscoverUpdater)
@@ -138,6 +215,7 @@ impl ServiceDiscover {
         (
             Self {
                 rx,
+                initial_changes: VecDeque::new(),
                 channel_cache: channel_cache.clone(),
                 backend,
                 config,
@@ -152,8 +230,6 @@ impl ServiceDiscover {
         backend: Arc<dyn DiscoveryBackend>,
         config: DiscoveryConfig,
     ) -> Result<(Self, ServiceDiscoverUpdater), Box<dyn std::error::Error + Send + Sync>> {
-        let (discover, updater) = Self::new_internal(16, backend.clone(), config.clone());
-
         // 立即执行一次服务发现，确保至少有一些服务可用（如果有的话）
         let service_type = config
             .backend_config
@@ -165,28 +241,44 @@ impl ServiceDiscover {
         let namespace = config.namespace.as_ref().and_then(|n| n.default.as_deref());
         let version = config.version.as_ref().and_then(|v| v.default.as_deref());
 
-        // 立即执行一次服务发现（传入 tag_filters，以便发现带 svid 等标签的实例）
-        if let Ok(new_instances) = backend
+        // Discover the initial snapshot before handing the consumer a stream.
+        let initial = match backend
             .discover(&service_type, namespace, version, tags_ref.as_ref())
             .await
         {
-            for new_inst in new_instances {
-                let id = new_inst.instance_id.clone();
-                match updater.create_channel_service(&new_inst).await {
-                    Ok(service) => {
-                        updater.insert(id.clone(), service).await;
-                        let mut current = discover.instances.write().await;
-                        current.insert(id, new_inst);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            service_type = %service_type,
-                            instance_id = %id,
-                            address = %new_inst.address,
-                            error = %e,
-                            "service discover: failed to prepare gRPC channel for instance"
-                        );
-                    }
+            Ok(instances) => instances,
+            Err(error) => {
+                tracing::warn!(service_type = %service_type, %error, "initial service discovery failed");
+                Vec::new()
+            }
+        };
+        const MAX_INITIAL_INSTANCES: usize = 4096;
+        if initial.len() > MAX_INITIAL_INSTANCES {
+            return Err(format!(
+                "service {service_type} has {} initial instances; limit is {MAX_INITIAL_INSTANCES}",
+                initial.len()
+            )
+            .into());
+        }
+        let (mut discover, updater) = Self::new_internal(16, backend.clone(), config.clone());
+        for new_inst in initial {
+            let id = new_inst.instance_id.clone();
+            match updater.create_channel_service(&new_inst).await {
+                Ok(service) => {
+                    discover
+                        .initial_changes
+                        .push_back(Change::Insert(id.clone(), service));
+                    let mut current = discover.instances.write().await;
+                    current.insert(id, new_inst);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        service_type = %service_type,
+                        instance_id = %id,
+                        address = %new_inst.address,
+                        error = %e,
+                        "service discover: failed to prepare gRPC channel for instance"
+                    );
                 }
             }
         }
@@ -239,13 +331,17 @@ impl ServiceDiscover {
             interval_timer.tick().await;
 
             loop {
-                interval_timer.tick().await;
+                tokio::select! {
+                    _ = updater.tx.closed() => break,
+                    _ = interval_timer.tick() => {}
+                }
                 let ns = namespace_interval.as_deref();
                 let ver = version_interval.as_deref();
-                match backend
-                    .discover(&service_type, ns, ver, tags_interval.as_ref())
-                    .await
-                {
+                let result = tokio::select! {
+                    _ = updater.tx.closed() => break,
+                    result = backend.discover(&service_type, ns, ver, tags_interval.as_ref()) => result,
+                };
+                match result {
                     Ok(new_instances) => {
                         let mut current = instances_interval.write().await;
                         let new_map: HashMap<String, ServiceInstance> = new_instances
@@ -349,7 +445,7 @@ impl ServiceDiscoverUpdater {
             .map_err(|e| format!("Invalid URI: {}", e))?;
         let channel = endpoint.connect_lazy();
 
-        let service = ChannelService::new(channel);
+        let service = ChannelService::new(channel, endpoint);
 
         // 缓存 Channel
         {
@@ -392,6 +488,9 @@ impl Stream for ServiceDiscover {
     type Item = Result<Change<String, ChannelService>, std::convert::Infallible>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(change) = self.initial_changes.pop_front() {
+            return Poll::Ready(Some(Ok(change)));
+        }
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(change)) => Poll::Ready(Some(Ok(change))),
             Poll::Ready(None) => Poll::Ready(None), // channel 关闭
@@ -512,5 +611,138 @@ impl ServiceClient {
             .map_err(|e| format!("Service call error: {}", e))?;
 
         Ok(channel)
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::discovery::config::{BackendType, LoadBalanceStrategy};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeBackend {
+        initial: Vec<ServiceInstance>,
+        calls: AtomicUsize,
+        block_refresh: bool,
+    }
+
+    #[async_trait]
+    impl DiscoveryBackend for FakeBackend {
+        async fn discover(
+            &self,
+            _service_type: &str,
+            _namespace: Option<&str>,
+            _version: Option<&str>,
+            _tags: Option<&HashMap<String, String>>,
+        ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call > 0 && self.block_refresh {
+                std::future::pending().await
+            } else {
+                Ok(self.initial.clone())
+            }
+        }
+
+        async fn register(
+            &self,
+            _instance: ServiceInstance,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn unregister(
+            &self,
+            _instance_id: &str,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn watch(
+            &self,
+            _service_type: &str,
+        ) -> Result<mpsc::Receiver<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>>
+        {
+            Ok(mpsc::channel(1).1)
+        }
+    }
+
+    fn config(refresh_interval: u64) -> DiscoveryConfig {
+        DiscoveryConfig {
+            backend: BackendType::Dns,
+            backend_config: HashMap::from([("service_type".into(), serde_json::json!("test"))]),
+            namespace: None,
+            version: None,
+            tag_filters: vec![],
+            load_balance: LoadBalanceStrategy::RoundRobin,
+            health_check: None,
+            refresh_interval: Some(refresh_interval),
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_snapshot_over_queue_capacity_returns_and_emits_every_node() {
+        for count in [17, 65] {
+            let initial = (0..count)
+                .map(|id| {
+                    ServiceInstance::new(
+                        "test",
+                        format!("node-{id}"),
+                        format!("127.0.0.1:{}", 20000 + id).parse().unwrap(),
+                    )
+                })
+                .collect();
+            let backend = Arc::new(FakeBackend {
+                initial,
+                calls: AtomicUsize::new(0),
+                block_refresh: false,
+            });
+            let (mut discover, updater) = tokio::time::timeout(
+                Duration::from_secs(1),
+                ServiceDiscover::from_backend(backend, config(3600)),
+            )
+            .await
+            .expect("initial discovery must not block on its own queue")
+            .unwrap();
+            assert_eq!(discover.get_instances().await.len(), count);
+            for _ in 0..count {
+                assert!(matches!(
+                    discover.next().await,
+                    Some(Ok(Change::Insert(_, _)))
+                ));
+            }
+            drop(discover);
+            drop(updater);
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_discover_cancels_pending_refresh_and_releases_backend() {
+        let backend = Arc::new(FakeBackend {
+            initial: vec![],
+            calls: AtomicUsize::new(0),
+            block_refresh: true,
+        });
+        let weak = Arc::downgrade(&backend);
+        let (discover, updater) = ServiceDiscover::from_backend(backend.clone(), config(1))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while backend.calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("refresh should start");
+        drop(backend);
+        drop(discover);
+        drop(updater);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while weak.strong_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("refresh must exit when its receiver is dropped");
     }
 }
