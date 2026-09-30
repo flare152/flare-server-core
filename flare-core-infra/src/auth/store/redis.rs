@@ -181,6 +181,7 @@ mod tests {
             user_id: "shared".into(),
             device_id: Some("ios".into()),
             connection_id: Some("old-connection".into()),
+            reason: Some("TENANT_UNAVAILABLE".into()),
         };
         let encoded = serde_json::to_string(&signal).unwrap();
         assert_eq!(
@@ -188,5 +189,9 @@ mod tests {
             signal
         );
         assert!(serde_json::from_str::<KickSignal>("shared").is_err());
+        // Signals from publishers that predate the reason still decode.
+        let legacy: KickSignal =
+            serde_json::from_str(r#"{"tenant_id":"tenant-a","user_id":"shared"}"#).unwrap();
+        assert_eq!(legacy.reason, None);
     }
 }

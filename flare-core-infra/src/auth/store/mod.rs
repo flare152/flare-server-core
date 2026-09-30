@@ -18,6 +18,11 @@ pub struct KickSignal {
     /// Exact gateway connection to close when an old session is replaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    /// Typed reason the gateway sends to each closed connection before closing it
+    /// (e.g. `TENANT_UNAVAILABLE`, `TOKEN_REVOKED`), so clients can tell a
+    /// revocation from a network drop. Signals without it close with a generic reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// 令牌存储接口，用于记录活跃令牌并支持撤销

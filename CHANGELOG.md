@@ -15,7 +15,8 @@
 - `TokenStore` 的 `register` / `revoke` / `revoke_user` 增加 `tenant_id` 参数。
   本版本新增的 `TokenStore::publish_kick` 与 `TokenService::revoke_user` /
   `publish_kick` 也按租户定义：踢线信号是 `KickSignal`（租户、用户、可选设备与连接
-  ID），频道载荷是它的 JSON，而不是裸 `user_id`。（bf15224）
+  ID，以及网关关连接前下发给客户端的可选类型化原因 `reason`），频道载荷是它的 JSON，
+  而不是裸 `user_id`。（bf15224）
 - `RedisTokenStore` 的键改为 `{namespace}:token:v2:*`，用户集合键按租户与用户 ID
   分别编码。升级前登记的令牌不在新的用户集合里，`revoke_user` 撤不到它们，只能等其
   自然过期；升级前写下的单个令牌撤销位仍然生效（见下方“修复”）。（bf15224）
