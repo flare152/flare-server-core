@@ -1105,6 +1105,31 @@ mod balance_failover_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_every_balanced_channel_clone_releases_discovery() {
+        let a = Replica::any_port();
+        let backend = Arc::new(StaticBackend {
+            instances: vec![ServiceInstance::new("test", "a", a.addr)],
+        });
+        let weak = Arc::downgrade(&backend);
+        let (discover, updater) = ServiceDiscover::from_backend(backend, config())
+            .await
+            .expect("discover");
+        let channel = discover.into_balance_channel(None, REQUEST_TIMEOUT);
+        let clone = channel.clone();
+        assert_eq!(run_calls(&clone, 10).await.errors, 0);
+        drop(updater);
+        drop(channel);
+        drop(clone);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.strong_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("forwarding and refresh tasks must exit once the channel is gone");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn isolated_replica_rejoins_after_restart_without_rediscovery() {
         let a = Replica::any_port();
         let mut b = Replica::any_port();
