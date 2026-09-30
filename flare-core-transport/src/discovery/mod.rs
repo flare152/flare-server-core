@@ -4,6 +4,7 @@
 //! 完全兼容 tower 生态系统，支持命名空间、版本控制和自定义标签。
 
 pub mod backend;
+pub mod balance;
 pub mod config;
 pub mod discover;
 pub mod examples;
@@ -11,6 +12,7 @@ pub mod factory;
 pub mod instance;
 
 pub use backend::DiscoveryBackend;
+pub use balance::BalancedChannel;
 pub use config::{
     BackendType, DiscoveryConfig, HealthCheckConfig, LoadBalanceStrategy, NamespaceConfig,
     TagFilter, VersionConfig, default_discovery_refresh_interval_secs,

@@ -16,6 +16,7 @@ use tower::Service;
 use tower::discover::Change;
 
 use crate::discovery::backend::DiscoveryBackend;
+use crate::discovery::balance::BalancedChannel;
 use crate::discovery::config::{
     DiscoveryConfig, TagFilter, default_discovery_refresh_interval_secs,
 };
@@ -134,16 +135,37 @@ pub struct ServiceDiscoverUpdater {
     channel_cache: Arc<RwLock<HashMap<String, ChannelService>>>,
 }
 
+/// HTTP/2 keepalive ping interval for balanced endpoints. A peer that stops
+/// answering (for example a killed container whose address now black-holes
+/// packets) is detected without waiting for TCP retransmission timeouts.
+const BALANCED_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Bound every phase a balanced endpoint can hang in: connect, request
+/// headers and keepalive acknowledgements.
+fn tune_balanced_endpoint(endpoint: Endpoint, request_timeout: Duration) -> Endpoint {
+    endpoint
+        .timeout(request_timeout)
+        .connect_timeout(request_timeout)
+        .http2_keep_alive_interval(BALANCED_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(request_timeout)
+        .keep_alive_while_idle(true)
+}
+
 impl ServiceDiscover {
-    /// Build one clonable tonic Channel whose endpoint set follows discovery.
-    /// A static fallback is used only while discovery has no registered nodes.
-    /// Dropping all Channel clones stops the forwarding task.
+    /// Build one clonable [`BalancedChannel`] whose endpoint set follows
+    /// discovery. A static fallback is used only while discovery has no
+    /// registered nodes. Endpoints that fail at the connection level are
+    /// isolated until a reconnect probe succeeds, so a dead replica stops
+    /// receiving requests before discovery removes it. Requests wait while no
+    /// endpoint is usable; callers must apply their own end-to-end deadline.
+    /// Dropping all clones stops the forwarding task.
     pub fn into_balance_channel(
         mut self,
         fallback: Option<Endpoint>,
         request_timeout: Duration,
-    ) -> Channel {
-        let (channel, tx) = Channel::balance_channel(64);
+    ) -> BalancedChannel {
+        let (channel, tx) = BalancedChannel::balance_channel(64, request_timeout);
+        let fallback = fallback.map(|endpoint| tune_balanced_endpoint(endpoint, request_timeout));
         tokio::spawn(async move {
             let mut instances = HashSet::new();
             if let Some(endpoint) = fallback.as_ref()
@@ -165,7 +187,7 @@ impl ServiceDiscover {
                         match event {
                             Change::Insert(id, service) => {
                                 let first = instances.is_empty();
-                                if tx.send(ChannelChange::Insert(BalancerKey::Instance(id.clone()), service.endpoint().clone().timeout(request_timeout))).await.is_err() {
+                                if tx.send(ChannelChange::Insert(BalancerKey::Instance(id.clone()), tune_balanced_endpoint(service.endpoint().clone(), request_timeout))).await.is_err() {
                                     break;
                                 }
                                 instances.insert(id);
@@ -744,5 +766,509 @@ mod lifecycle_tests {
         })
         .await
         .expect("refresh must exit when its receiver is dropped");
+    }
+}
+
+/// In-process failover test: two real tonic servers behind a controllable
+/// discovery backend. One replica is stopped without a discovery Remove,
+/// which is what callers see between a crash and the registry noticing it.
+#[cfg(test)]
+mod balance_failover_tests {
+    use super::*;
+    use crate::discovery::config::{BackendType, LoadBalanceStrategy};
+    use async_trait::async_trait;
+    use std::convert::Infallible;
+    use std::fmt;
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+    use tonic::body::Body;
+    use tonic::server::NamedService;
+    use tonic::transport::Server;
+    use tower::ServiceExt;
+
+    const CALLS: usize = 1000;
+    const CONCURRENCY: usize = 16;
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// Unary handler answering trailers-only OK and counting hits.
+    #[derive(Clone)]
+    struct Ping {
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl NamedService for Ping {
+        const NAME: &'static str = "test.Ping";
+    }
+
+    impl Service<http::Request<Body>> for Ping {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = futures::future::Ready<Result<Self::Response, Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: http::Request<Body>) -> Self::Future {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            let response = http::Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "0")
+                .body(Body::empty())
+                .expect("static response");
+            futures::future::ready(Ok(response))
+        }
+    }
+
+    /// Each replica owns an OS thread and runtime. Stopping it drops the
+    /// runtime, which closes the listener and every accepted connection the
+    /// way a crashed process would.
+    struct Replica {
+        addr: SocketAddr,
+        hits: Arc<AtomicUsize>,
+        stop: Option<tokio::sync::oneshot::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Replica {
+        fn start(addr: SocketAddr) -> Self {
+            let listener = std::net::TcpListener::bind(addr).expect("bind replica");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let addr = listener.local_addr().expect("replica address");
+            let hits = Arc::new(AtomicUsize::new(0));
+            let service = Ping { hits: hits.clone() };
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("replica runtime");
+                runtime.block_on(async move {
+                    let listener =
+                        tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+                    let incoming = tonic::transport::server::TcpIncoming::from(listener);
+                    tokio::select! {
+                        _ = Server::builder().add_service(service).serve_with_incoming(incoming) => {}
+                        _ = stopped => {}
+                    }
+                });
+                drop(runtime);
+            });
+            Self {
+                addr,
+                hits,
+                stop: Some(stop),
+                thread: Some(thread),
+            }
+        }
+
+        fn any_port() -> Self {
+            Self::start("127.0.0.1:0".parse().expect("loopback address"))
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::Relaxed)
+        }
+
+        fn kill(&mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("replica thread");
+            }
+        }
+    }
+
+    impl Drop for Replica {
+        fn drop(&mut self) {
+            self.kill();
+        }
+    }
+
+    /// Discovery backend that only answers the initial snapshot; the test
+    /// drives Remove through the updater.
+    struct StaticBackend {
+        instances: Vec<ServiceInstance>,
+    }
+
+    #[async_trait]
+    impl DiscoveryBackend for StaticBackend {
+        async fn discover(
+            &self,
+            _service_type: &str,
+            _namespace: Option<&str>,
+            _version: Option<&str>,
+            _tags: Option<&HashMap<String, String>>,
+        ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.instances.clone())
+        }
+
+        async fn register(
+            &self,
+            _instance: ServiceInstance,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn unregister(
+            &self,
+            _instance_id: &str,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn watch(
+            &self,
+            _service_type: &str,
+        ) -> Result<mpsc::Receiver<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>>
+        {
+            Ok(mpsc::channel(1).1)
+        }
+    }
+
+    fn config() -> DiscoveryConfig {
+        DiscoveryConfig {
+            backend: BackendType::Dns,
+            backend_config: HashMap::from([("service_type".into(), serde_json::json!("test"))]),
+            namespace: None,
+            version: None,
+            tag_filters: vec![],
+            load_balance: LoadBalanceStrategy::RoundRobin,
+            health_check: None,
+            // No periodic refresh: only the test decides when Remove happens.
+            refresh_interval: Some(3600),
+        }
+    }
+
+    async fn discovered_pair(
+        a: &Replica,
+        b: &Replica,
+    ) -> (BalancedChannel, ServiceDiscoverUpdater) {
+        let backend = Arc::new(StaticBackend {
+            instances: vec![
+                ServiceInstance::new("test", "a", a.addr),
+                ServiceInstance::new("test", "b", b.addr),
+            ],
+        });
+        let (discover, updater) = ServiceDiscover::from_backend(backend, config())
+            .await
+            .expect("discover");
+        (
+            discover.into_balance_channel(None, REQUEST_TIMEOUT),
+            updater,
+        )
+    }
+
+    fn ping_request() -> http::Request<Body> {
+        http::Request::builder()
+            .method("POST")
+            .uri("/test.Ping/Call")
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(Body::empty())
+            .expect("static request")
+    }
+
+    struct Stats {
+        calls: usize,
+        errors: usize,
+        p50: Duration,
+        p99: Duration,
+    }
+
+    impl Stats {
+        fn error_rate(&self) -> f64 {
+            self.errors as f64 / self.calls as f64
+        }
+    }
+
+    impl fmt::Debug for Stats {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "calls={} errors={} error_rate={:.1}% p50={:?} p99={:?}",
+                self.calls,
+                self.errors,
+                self.error_rate() * 100.0,
+                self.p50,
+                self.p99
+            )
+        }
+    }
+
+    async fn run_calls<S>(channel: &S, calls: usize) -> Stats
+    where
+        S: Service<http::Request<Body>, Response = http::Response<Body>> + Clone + Send + 'static,
+        S::Future: Send,
+    {
+        use futures::StreamExt;
+        let mut results: Vec<(Duration, bool)> = futures::stream::iter(0..calls)
+            .map(|_| {
+                let channel = channel.clone();
+                async move {
+                    let started = Instant::now();
+                    let ok = matches!(
+                        tokio::time::timeout(REQUEST_TIMEOUT, channel.oneshot(ping_request())).await,
+                        Ok(Ok(response)) if response.headers().get("grpc-status").is_some_and(|status| status == "0")
+                    );
+                    (started.elapsed(), ok)
+                }
+            })
+            .buffer_unordered(CONCURRENCY)
+            .collect()
+            .await;
+        results.sort_by_key(|(latency, _)| *latency);
+        let percentile =
+            |p: f64| results[((results.len() as f64 * p).ceil() as usize).max(1) - 1].0;
+        Stats {
+            calls,
+            errors: results.iter().filter(|(_, ok)| !ok).count(),
+            p50: percentile(0.50),
+            p99: percentile(0.99),
+        }
+    }
+
+    /// Give the forwarding task and the balancer a moment to apply a change.
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_replica_is_isolated_before_discovery_removes_it() {
+        let a = Replica::any_port();
+        let mut b = Replica::any_port();
+        let (channel, updater) = discovered_pair(&a, &b).await;
+
+        let healthy = run_calls(&channel, CALLS).await;
+        assert_eq!(healthy.errors, 0, "both replicas up: {healthy:?}");
+        assert!(
+            a.hits() > 0 && b.hits() > 0,
+            "both replicas must take traffic"
+        );
+
+        b.kill();
+        let stopped = run_calls(&channel, CALLS).await;
+        updater.remove("b").await;
+        settle().await;
+        let removed = run_calls(&channel, CALLS).await;
+
+        println!(
+            "BalancedChannel stop-one: healthy [{healthy:?}] stopped-without-Remove [{stopped:?}] after-Remove [{removed:?}]"
+        );
+        assert!(
+            stopped.error_rate() <= 0.05,
+            "a stopped replica must be isolated after its first connection failures: {stopped:?}"
+        );
+        assert!(stopped.p99 < REQUEST_TIMEOUT, "{stopped:?}");
+        assert_eq!(removed.errors, 0, "after Remove: {removed:?}");
+    }
+
+    /// Characterizes tonic's own balance channel, which this module replaces:
+    /// lazy endpoints keep reporting ready after connection failures, so P2C
+    /// keeps routing to the stopped replica until discovery removes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tonic_balance_channel_keeps_routing_to_stopped_replica() {
+        let a = Replica::any_port();
+        let mut b = Replica::any_port();
+        let (channel, tx) = Channel::balance_channel::<&'static str>(64);
+        for (key, replica) in [("a", &a), ("b", &b)] {
+            let endpoint = Endpoint::from_shared(format!("http://{}", replica.addr))
+                .expect("endpoint")
+                .timeout(REQUEST_TIMEOUT);
+            tx.send(ChannelChange::Insert(key, endpoint))
+                .await
+                .expect("insert");
+        }
+        settle().await;
+
+        let healthy = run_calls(&channel, CALLS).await;
+        assert_eq!(healthy.errors, 0, "both replicas up: {healthy:?}");
+
+        b.kill();
+        let stopped = run_calls(&channel, CALLS).await;
+        tx.send(ChannelChange::Remove("b")).await.expect("remove");
+        settle().await;
+        let removed = run_calls(&channel, CALLS).await;
+
+        println!(
+            "tonic balance_channel stop-one: healthy [{healthy:?}] stopped-without-Remove [{stopped:?}] after-Remove [{removed:?}]"
+        );
+        assert!(
+            stopped.error_rate() >= 0.10,
+            "tonic now isolates failed endpoints itself; revisit BalancedChannel: {stopped:?}"
+        );
+        assert_eq!(removed.errors, 0, "after Remove: {removed:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn isolated_replica_rejoins_after_restart_without_rediscovery() {
+        let a = Replica::any_port();
+        let mut b = Replica::any_port();
+        let (channel, _updater) = discovered_pair(&a, &b).await;
+        assert_eq!(run_calls(&channel, 200).await.errors, 0);
+
+        let b_addr = b.addr;
+        b.kill();
+        let stopped = run_calls(&channel, 200).await;
+        assert!(stopped.errors <= 20, "{stopped:?}");
+
+        let b = Replica::start(b_addr);
+        let rejoined = tokio::time::timeout(Duration::from_secs(10), async {
+            while b.hits() == 0 {
+                let stats = run_calls(&channel, 50).await;
+                assert_eq!(stats.errors, 0, "{stats:?}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        assert!(
+            rejoined.is_ok(),
+            "a restarted replica must rejoin once its reconnect probe succeeds"
+        );
+    }
+
+    /// TCP relay that can stop forwarding while keeping every socket open:
+    /// the peer looks alive to the kernel but never answers, as when a killed
+    /// container's address black-holes packets.
+    struct FreezableRelay {
+        addr: SocketAddr,
+        frozen: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl FreezableRelay {
+        async fn start(upstream: SocketAddr) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind relay");
+            let addr = listener.local_addr().expect("relay address");
+            let frozen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = frozen.clone();
+            tokio::spawn(async move {
+                while let Ok((inbound, _)) = listener.accept().await {
+                    let frozen = flag.clone();
+                    tokio::spawn(async move {
+                        if frozen.load(Ordering::Relaxed) {
+                            let _held = inbound;
+                            return std::future::pending::<()>().await;
+                        }
+                        let Ok(outbound) = tokio::net::TcpStream::connect(upstream).await else {
+                            return;
+                        };
+                        let (inbound_read, inbound_write) = inbound.into_split();
+                        let (outbound_read, outbound_write) = outbound.into_split();
+                        tokio::join!(
+                            pump(inbound_read, outbound_write, frozen.clone()),
+                            pump(outbound_read, inbound_write, frozen),
+                        );
+                    });
+                }
+            });
+            Self { addr, frozen }
+        }
+
+        fn freeze(&self) {
+            self.frozen.store(true, Ordering::Relaxed);
+        }
+    }
+
+    async fn pump(
+        mut from: tokio::net::tcp::OwnedReadHalf,
+        mut to: tokio::net::tcp::OwnedWriteHalf,
+        frozen: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buffer = vec![0u8; 16 * 1024];
+        loop {
+            let read = match from.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => read,
+            };
+            if frozen.load(Ordering::Relaxed) {
+                // Swallow traffic and keep both halves open.
+                let _held = (from, to);
+                std::future::pending::<()>().await;
+                return;
+            }
+            if to.write_all(&buffer[..read]).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// A black-holed replica never returns a connection error, so isolation
+    /// cannot kick in before HTTP/2 keepalive notices it. Until then P2C's
+    /// in-flight load keeps most traffic away: only requests dispatched before
+    /// its stuck count outgrew the healthy replica's load hit the deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn black_holed_replica_is_avoided_by_in_flight_load() {
+        let a = Replica::any_port();
+        let b = Replica::any_port();
+        let relay = FreezableRelay::start(b.addr).await;
+        let backend = Arc::new(StaticBackend {
+            instances: vec![
+                ServiceInstance::new("test", "a", a.addr),
+                ServiceInstance::new("test", "b", relay.addr),
+            ],
+        });
+        let (discover, updater) = ServiceDiscover::from_backend(backend, config())
+            .await
+            .expect("discover");
+        let channel = discover.into_balance_channel(None, REQUEST_TIMEOUT);
+
+        let healthy = run_calls(&channel, CALLS).await;
+        assert_eq!(healthy.errors, 0, "both replicas up: {healthy:?}");
+        assert!(b.hits() > 0, "the relayed replica must take traffic");
+
+        relay.freeze();
+        let started = Instant::now();
+        let frozen = run_calls(&channel, CALLS).await;
+        let frozen_elapsed = started.elapsed();
+        updater.remove("b").await;
+        settle().await;
+        let removed = run_calls(&channel, CALLS).await;
+
+        println!(
+            "BalancedChannel black-hole: healthy [{healthy:?}] frozen-without-Remove [{frozen:?}] wall={frozen_elapsed:?} after-Remove [{removed:?}]"
+        );
+        assert!(
+            frozen.error_rate() <= 0.05,
+            "in-flight load must steer traffic away from a silent replica: {frozen:?}"
+        );
+        assert_eq!(removed.errors, 0, "after Remove: {removed:?}");
+    }
+
+    /// Baseline for the black-hole case with tonic's own balance channel.
+    /// Slow (every stuck call waits the full deadline), so run on demand:
+    /// `cargo test -p flare-core-transport --features discovery -- --ignored --nocapture black_hole`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "slow baseline: stuck calls each wait the full deadline"]
+    async fn tonic_balance_channel_black_hole_baseline() {
+        let a = Replica::any_port();
+        let b = Replica::any_port();
+        let relay = FreezableRelay::start(b.addr).await;
+        let (channel, tx) = Channel::balance_channel::<&'static str>(64);
+        for (key, addr) in [("a", a.addr), ("b", relay.addr)] {
+            let endpoint = Endpoint::from_shared(format!("http://{addr}"))
+                .expect("endpoint")
+                .timeout(REQUEST_TIMEOUT);
+            tx.send(ChannelChange::Insert(key, endpoint))
+                .await
+                .expect("insert");
+        }
+        settle().await;
+        let healthy = run_calls(&channel, 200).await;
+        assert_eq!(healthy.errors, 0, "both replicas up: {healthy:?}");
+
+        relay.freeze();
+        let started = Instant::now();
+        let frozen = run_calls(&channel, 200).await;
+        let frozen_elapsed = started.elapsed();
+        println!(
+            "tonic balance_channel black-hole: healthy [{healthy:?}] frozen-without-Remove [{frozen:?}] wall={frozen_elapsed:?}"
+        );
     }
 }

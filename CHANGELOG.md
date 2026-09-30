@@ -53,9 +53,14 @@
   等身份头，已验证的上下文不会再被元数据回填覆盖；未迁移的服务仍走原 `ContextLayer`。
   见 `docs/signed-context.md`。（bf15224）
 - 动态负载均衡通道：`ServiceDiscover::into_balance_channel(fallback, request_timeout)`
-  返回一个可克隆的 tonic `Channel`，其节点集合随服务发现的增删刷新，不再固定在
-  首次选中的节点；静态回落地址只在没有已注册节点时使用；所有 `Channel` 克隆释放后
-  转发任务随之退出。（c143f19）
+  返回一个可克隆的 `discovery::BalancedChannel`（可直接作为 tonic 生成客户端的传输
+  层），其节点集合随服务发现的增删刷新，不再固定在首次选中的节点；静态回落地址只在
+  没有已注册节点时使用；所有克隆释放后转发任务随之退出。（c143f19）
+  它不用 tonic 自带的 `Channel::balance_channel`：后者的懒连接在建连失败后仍报就绪，
+  服务发现发出 Remove 之前约有两成到一半的请求落到已停的副本上。`BalancedChannel`
+  在连接级失败后隔离该节点、按退避重新建连探测，成功后自动恢复（同一实例原地重启
+  不需要重新发现）；P2C 以在途请求数为负载，避开无响应的副本；节点连接带建连超时与
+  HTTP/2 keepalive。没有可用节点时请求会排队，调用方须自带端到端截止时间。
 - JSON 日志：`LoggingSubscriberOptions` 增加 `format`（`LogFormat::Text` /
   `LogFormat::Json`）。JSON 每个事件一行，字段平铺并带当前 span，不含 ANSI 转义，
   可与 OTLP trace 导出同时启用；未知格式名解析为 `UnknownLogFormat` 错误，而不是
