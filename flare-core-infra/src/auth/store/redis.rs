@@ -41,6 +41,12 @@ impl RedisTokenStore {
         format!("{}:token:v2:revoked:{}", self.namespace, jti)
     }
 
+    /// Revocation mark from before the tenant-scoped key space. jti is globally
+    /// unique, so these keep applying until the tokens they name expire.
+    fn legacy_revoked_key(&self, jti: &str) -> String {
+        format!("{}:token:revoked:{}", self.namespace, jti)
+    }
+
     fn user_set_key(&self, tenant_id: &str, user_id: &str) -> String {
         format!(
             "{}:token:v2:user:{}:{}",
@@ -127,15 +133,13 @@ impl TokenStore for RedisTokenStore {
             .client
             .get_connection()
             .map_err(|err| anyhow!("failed to get redis connection: {err}"))?;
-        let revoked: bool = conn
-            .exists(self.revoked_key(jti))
+        // Only an explicit revocation counts. Tokens from a trusted signer outside
+        // Core (Social's IM connect tokens) are never registered here, so a missing
+        // active key is not a revocation; pre-v2 revocations still apply.
+        let revoked: usize = conn
+            .exists(&[self.revoked_key(jti), self.legacy_revoked_key(jti)][..])
             .map_err(|err| anyhow!("failed to check revoked key: {err}"))?;
-        let active: bool = conn
-            .exists(self.active_key(jti))
-            .map_err(|err| anyhow!("failed to check active key: {err}"))?;
-        // Direct v2 cutover: a token registered only in the old unscoped key
-        // space cannot be considered active after the tenant-isolation switch.
-        Ok(revoked || !active)
+        Ok(revoked > 0)
     }
 
     fn publish_kick(&self, signal: &KickSignal) -> Result<()> {
@@ -166,6 +170,8 @@ mod tests {
             store.user_set_key("a", "b:c")
         );
         assert!(store.active_key("jti").contains(":v2:"));
+        assert_eq!(store.legacy_revoked_key("jti"), "flare:token:revoked:jti");
+        assert_ne!(store.legacy_revoked_key("jti"), store.revoked_key("jti"));
     }
 
     #[test]
