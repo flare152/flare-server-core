@@ -3,6 +3,7 @@
 //! 提供 NATS JetStream 的生产者和消费者实现，支持 Context 透传。
 
 pub mod config;
+pub mod connect;
 pub mod consumer;
 pub mod producer;
 

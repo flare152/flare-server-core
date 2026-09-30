@@ -99,9 +99,9 @@ impl NatsMessageFetcher {
     where
         C: NatsConsumerConfig + Send + Sync,
     {
-        let client = async_nats::connect(&config.nats_url())
+        let client = super::connect::connect(config.nats_url())
             .await
-            .map_err(|e| ConsumerError::Connection(e.to_string()))?;
+            .map_err(ConsumerError::Connection)?;
 
         let context = jetstream::new(client);
         let manual_ack = config.enable_manual_ack();

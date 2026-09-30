@@ -35,9 +35,9 @@ impl NatsProducer {
     where
         C: NatsProducerConfig + Send + Sync,
     {
-        let client = async_nats::connect(&config.nats_url())
+        let client = super::connect::connect(config.nats_url())
             .await
-            .map_err(|e| ProducerError::Connection(e.to_string()))?;
+            .map_err(ProducerError::Connection)?;
 
         let mut context = jetstream::new(client);
         context.set_timeout(Duration::from_millis(config.timeout_ms()));
