@@ -220,7 +220,16 @@ fn signed_context(claims: &SignedContextClaims, token: &str) -> Ctx {
     let mut ctx = Context::with_request_id(&claims.request_id)
         .with_tenant_id(&claims.tenant_id)
         .with_actor(actor);
-    if claims.actor_type == SignedActorType::User {
+    // A TenantAdmin issuer signs the authenticated administrator's own id as
+    // actor_id, and that id is also the acting user (issuers build the context
+    // with user_id == actor_id and handlers record it as the operator). Only the
+    // signed actor_id is used, so no caller can name another user; elevated
+    // rights still come only from the signed roles. Service, System and Guest
+    // actors are not users and never get a user_id.
+    if matches!(
+        claims.actor_type,
+        SignedActorType::User | SignedActorType::TenantAdmin
+    ) {
         ctx = ctx.with_user_id(&claims.actor_id);
     }
     Arc::new(ctx.insert_data(VerifiedContext::signed(claims.clone(), token.to_owned())))
@@ -327,6 +336,80 @@ mod tests {
         let merged = require_ctx_from_request(&tonic_req).unwrap();
         assert_eq!(merged.user_id(), Some("real-user"));
         assert_eq!(merged.tenant_id(), Some("real-tenant"));
+    }
+
+    #[tokio::test]
+    async fn tenant_admin_claims_restore_the_acting_user_and_nothing_else_does() {
+        let (signer, verifier) = keys();
+        let sign = |actor_type, actor_id: &str, roles: &[&str]| {
+            signer
+                .sign(
+                    &SignedContextIdentity::new(actor_type, actor_id, "tenant-a", "req-1")
+                        .with_roles(roles.iter().map(|role| role.to_string()).collect()),
+                )
+                .unwrap()
+        };
+        let seen = Arc::new(Mutex::new(None));
+        let mut service =
+            SignedContextLayer::new(verifier.clone()).layer(ObservingService(seen.clone()));
+        for (actor_type, actor_id, roles, expected_user) in [
+            (
+                SignedActorType::TenantAdmin,
+                "employee-1",
+                &["control"][..],
+                Some("employee-1"),
+            ),
+            (
+                SignedActorType::TenantAdmin,
+                "employee-2",
+                &[][..],
+                Some("employee-2"),
+            ),
+            (SignedActorType::Service, "flare-user", &[][..], None),
+            (SignedActorType::System, "scheduler", &["control"][..], None),
+            (SignedActorType::Guest, "anonymous", &[][..], None),
+        ] {
+            let token = sign(actor_type, actor_id, roles);
+            // A forged bare x-user-id must never become (or replace) the acting user.
+            let req = HttpRequest::builder()
+                .header(SIGNED_CONTEXT_HEADER, &token)
+                .header("x-user-id", "victim")
+                .header("x-actor-roles", "control")
+                .body(Body::empty())
+                .unwrap();
+            service.call(req).await.unwrap();
+            let (ctx, had_legacy_headers) = seen.lock().unwrap().take().unwrap();
+            assert!(!had_legacy_headers);
+            assert_eq!(ctx.user_id(), expected_user, "{actor_type:?}");
+            assert_eq!(ctx.actor().unwrap().actor_id(), actor_id);
+            let roles_seen: Vec<String> = ctx
+                .actor()
+                .unwrap()
+                .roles()
+                .iter()
+                .map(|role| role.to_string())
+                .collect();
+            assert_eq!(roles_seen, roles, "{actor_type:?}");
+
+            // The method-level verifier builds the same context.
+            let mut carrier = Request::new(());
+            carrier
+                .metadata_mut()
+                .append(SIGNED_CONTEXT_HEADER, token.parse().unwrap());
+            carrier
+                .metadata_mut()
+                .insert("x-user-id", "victim".parse().unwrap());
+            let direct = verify_signed_context_metadata(carrier.metadata(), &verifier).unwrap();
+            assert_eq!(direct.user_id(), expected_user, "{actor_type:?}");
+            // Metadata backfill cannot add a user where the claims gave none.
+            let mut tonic_req = Request::new(());
+            tonic_req.extensions_mut().insert(direct);
+            tonic_req
+                .metadata_mut()
+                .insert("x-user-id", "victim".parse().unwrap());
+            let merged = require_ctx_from_request(&tonic_req).unwrap();
+            assert_eq!(merged.user_id(), expected_user, "{actor_type:?}");
+        }
     }
 
     #[tokio::test]

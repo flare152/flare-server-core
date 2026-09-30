@@ -13,6 +13,12 @@ actor ID、租户、角色、可选 credential ID、request ID 和唯一 jti。�
 已验证的 Context 后不再从 metadata 回填用户、租户或设备；未迁移的服务仍使用原来的
 `ContextLayer` 路径，两者不会因为同名导出而使用不同实现。
 
+已验证 Context 的 `user_id` 只由声明决定：`user` 与 `tenant_admin` 的 actor ID 同时
+作为 `user_id`（租户管理员的 actor ID 就是已认证管理员本人的 ID，处理器把它记为操作
+者）；`service`、`system`、`guest` 不是用户，没有 `user_id`。这不带来额外权限，管理类
+放行仍只看签名里的角色。签发端签 `tenant_admin` 时只能用已认证管理员本人的 ID，不得
+代签别的用户。
+
 ```rust,ignore
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextLayer,
