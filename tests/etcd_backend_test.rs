@@ -1,4 +1,7 @@
 //! etcd 服务发现后端测试
+//!
+//! 用例都标了 `#[ignore]`：默认的 `cargo test` 只记为 ignored；`-- --ignored` 显式运行时
+//! etcd 必须可达，否则直接失败，不会把没跑的用例记为通过。
 
 use flare_server_core::discovery::backend::etcd::EtcdBackend;
 use flare_server_core::discovery::{
@@ -46,37 +49,23 @@ fn create_test_instance(id: &str, port: u16) -> ServiceInstance {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 etcd 实例
+#[ignore = "requires a running etcd at localhost:2379"]
 async fn test_etcd_backend_creation() {
     let config = create_etcd_config();
 
-    match EtcdBackend::new(&config).await {
-        Ok(_) => {
-            println!("✅ etcd backend created successfully");
-        }
-        Err(e) => {
-            eprintln!(
-                "⚠️  etcd backend creation failed (expected if etcd is not running): {}",
-                e
-            );
-            // 如果 etcd 未运行，跳过测试
-            return;
-        }
-    }
+    EtcdBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("etcd not available at localhost:2379: {e}"));
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 etcd 实例
+#[ignore = "requires a running etcd at localhost:2379"]
 async fn test_etcd_register_and_discover() {
     let config = create_etcd_config();
 
-    let backend = match EtcdBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: etcd not available: {}", e);
-            return;
-        }
-    };
+    let backend = EtcdBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("etcd not available at localhost:2379: {e}"));
 
     // 创建测试实例
     let instance1 = create_test_instance("instance-1", 8080);
@@ -119,17 +108,13 @@ async fn test_etcd_register_and_discover() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 etcd 实例
+#[ignore = "requires a running etcd at localhost:2379"]
 async fn test_etcd_namespace_filtering() {
     let config = create_etcd_config();
 
-    let backend = match EtcdBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: etcd not available: {}", e);
-            return;
-        }
-    };
+    let backend = EtcdBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("etcd not available at localhost:2379: {e}"));
 
     // 创建不同命名空间的实例
     let instance1 = create_test_instance("instance-1", 8080).with_namespace("test");
@@ -165,17 +150,13 @@ async fn test_etcd_namespace_filtering() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 etcd 实例
+#[ignore = "requires a running etcd at localhost:2379"]
 async fn test_etcd_version_filtering() {
     let config = create_etcd_config();
 
-    let backend = match EtcdBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: etcd not available: {}", e);
-            return;
-        }
-    };
+    let backend = EtcdBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("etcd not available at localhost:2379: {e}"));
 
     // 创建不同版本的实例
     let instance1 = create_test_instance("instance-1", 8080).with_version("v1.0.0");
@@ -211,17 +192,13 @@ async fn test_etcd_version_filtering() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 etcd 实例
+#[ignore = "requires a running etcd at localhost:2379"]
 async fn test_etcd_tag_filtering() {
     let config = create_etcd_config();
 
-    let backend = match EtcdBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: etcd not available: {}", e);
-            return;
-        }
-    };
+    let backend = EtcdBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("etcd not available at localhost:2379: {e}"));
 
     // 创建不同标签的实例
     let instance1 = create_test_instance("instance-1", 8080)
@@ -264,17 +241,13 @@ async fn test_etcd_tag_filtering() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 etcd 实例
+#[ignore = "requires a running etcd at localhost:2379"]
 async fn test_etcd_unregister() {
     let config = create_etcd_config();
 
-    let backend = match EtcdBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: etcd not available: {}", e);
-            return;
-        }
-    };
+    let backend = EtcdBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("etcd not available at localhost:2379: {e}"));
 
     // 注册实例
     let instance = create_test_instance("instance-1", 8080);
@@ -309,17 +282,13 @@ async fn test_etcd_unregister() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 etcd 实例
+#[ignore = "requires a running etcd at localhost:2379"]
 async fn test_etcd_watch() {
     let config = create_etcd_config();
 
-    let backend = match EtcdBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: etcd not available: {}", e);
-            return;
-        }
-    };
+    let backend = EtcdBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("etcd not available at localhost:2379: {e}"));
 
     // 启动 watch
     let mut receiver = backend

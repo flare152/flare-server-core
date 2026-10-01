@@ -165,6 +165,13 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo package -p flare-server-core
 ```
 
+Tests that need a running service are marked `#[ignore = "requires ..."]`, so the
+command above reports them as ignored, never as passed. Today these are the etcd
+(`localhost:2379`) and Consul (`localhost:8500`) discovery backend tests. Run them
+explicitly with `cargo test --features discovery --test etcd_backend_test -- --ignored`
+(or `consul_backend_test`); an unreachable service fails the test instead of
+skipping it. New tests that need external services follow the same rule.
+
 When publishing the full workspace, publish dependency crates first:
 
 1. `flare-core-base`

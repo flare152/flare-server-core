@@ -1,4 +1,7 @@
 //! Consul 服务发现后端测试
+//!
+//! 用例都标了 `#[ignore]`：默认的 `cargo test` 只记为 ignored；`-- --ignored` 显式运行时
+//! Consul 必须可达，否则直接失败，不会把没跑的用例记为通过。
 
 use flare_server_core::discovery::backend::consul::ConsulBackend;
 use flare_server_core::discovery::{
@@ -45,37 +48,23 @@ fn create_test_instance(id: &str, port: u16) -> ServiceInstance {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 Consul 实例
+#[ignore = "requires a running Consul at localhost:8500"]
 async fn test_consul_backend_creation() {
     let config = create_consul_config();
 
-    match ConsulBackend::new(&config).await {
-        Ok(_) => {
-            println!("✅ Consul backend created successfully");
-        }
-        Err(e) => {
-            eprintln!(
-                "⚠️  Consul backend creation failed (expected if Consul is not running): {}",
-                e
-            );
-            // 如果 Consul 未运行，跳过测试
-            return;
-        }
-    }
+    ConsulBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("Consul not available at localhost:8500: {e}"));
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 Consul 实例
+#[ignore = "requires a running Consul at localhost:8500"]
 async fn test_consul_register_and_discover() {
     let config = create_consul_config();
 
-    let backend = match ConsulBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: Consul not available: {}", e);
-            return;
-        }
-    };
+    let backend = ConsulBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("Consul not available at localhost:8500: {e}"));
 
     // 创建测试实例
     let instance1 = create_test_instance("instance-1", 8080);
@@ -118,17 +107,13 @@ async fn test_consul_register_and_discover() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 Consul 实例
+#[ignore = "requires a running Consul at localhost:8500"]
 async fn test_consul_namespace_filtering() {
     let config = create_consul_config();
 
-    let backend = match ConsulBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: Consul not available: {}", e);
-            return;
-        }
-    };
+    let backend = ConsulBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("Consul not available at localhost:8500: {e}"));
 
     // 创建不同命名空间的实例
     let instance1 = create_test_instance("instance-1", 8080).with_namespace("test");
@@ -161,17 +146,13 @@ async fn test_consul_namespace_filtering() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 Consul 实例
+#[ignore = "requires a running Consul at localhost:8500"]
 async fn test_consul_version_filtering() {
     let config = create_consul_config();
 
-    let backend = match ConsulBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: Consul not available: {}", e);
-            return;
-        }
-    };
+    let backend = ConsulBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("Consul not available at localhost:8500: {e}"));
 
     // 创建不同版本的实例
     let instance1 = create_test_instance("instance-1", 8080).with_version("v1.0.0");
@@ -207,17 +188,13 @@ async fn test_consul_version_filtering() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 Consul 实例
+#[ignore = "requires a running Consul at localhost:8500"]
 async fn test_consul_tag_filtering() {
     let config = create_consul_config();
 
-    let backend = match ConsulBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: Consul not available: {}", e);
-            return;
-        }
-    };
+    let backend = ConsulBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("Consul not available at localhost:8500: {e}"));
 
     // 创建不同标签的实例
     let instance1 = create_test_instance("instance-1", 8080)
@@ -262,17 +239,13 @@ async fn test_consul_tag_filtering() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 Consul 实例
+#[ignore = "requires a running Consul at localhost:8500"]
 async fn test_consul_unregister() {
     let config = create_consul_config();
 
-    let backend = match ConsulBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: Consul not available: {}", e);
-            return;
-        }
-    };
+    let backend = ConsulBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("Consul not available at localhost:8500: {e}"));
 
     // 注册实例
     let instance = create_test_instance("instance-1", 8080);
@@ -307,17 +280,13 @@ async fn test_consul_unregister() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 Consul 实例
+#[ignore = "requires a running Consul at localhost:8500"]
 async fn test_consul_watch() {
     let config = create_consul_config();
 
-    let backend = match ConsulBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: Consul not available: {}", e);
-            return;
-        }
-    };
+    let backend = ConsulBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("Consul not available at localhost:8500: {e}"));
 
     // 启动 watch
     let mut receiver = backend
@@ -347,17 +316,13 @@ async fn test_consul_watch() {
 }
 
 #[tokio::test]
-#[ignore] // 需要运行中的 Consul 实例
+#[ignore = "requires a running Consul at localhost:8500"]
 async fn test_consul_health_check() {
     let config = create_consul_config();
 
-    let backend = match ConsulBackend::new(&config).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("⚠️  Skipping test: Consul not available: {}", e);
-            return;
-        }
-    };
+    let backend = ConsulBackend::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("Consul not available at localhost:8500: {e}"));
 
     // 注册实例（Consul 会自动进行健康检查）
     let instance = create_test_instance("instance-1", 8080);

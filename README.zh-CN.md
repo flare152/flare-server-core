@@ -161,6 +161,11 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo package -p flare-server-core
 ```
 
+需要外部服务的用例统一标 `#[ignore = "requires ..."]`，上面的命令把它们记为 ignored，不会记为
+passed。目前只有 etcd（`localhost:2379`）与 Consul（`localhost:8500`）两个服务发现后端的用例。
+用 `cargo test --features discovery --test etcd_backend_test -- --ignored`（或
+`consul_backend_test`）显式运行；服务不可达时直接失败，不会跳过。新增需要外部服务的用例照此写。
+
 发布整个工作区时，先发布依赖 crate：
 
 1. `flare-core-base`
