@@ -122,7 +122,7 @@ pub struct TagFilter {
 }
 
 /// 负载均衡策略
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadBalanceStrategy {
     /// 轮询
@@ -130,6 +130,7 @@ pub enum LoadBalanceStrategy {
     /// 随机
     Random,
     /// 一致性哈希
+    #[default]
     ConsistentHash,
     /// 最少连接
     LeastConnections,
@@ -137,12 +138,6 @@ pub enum LoadBalanceStrategy {
     WeightedRoundRobin,
     /// 加权随机
     WeightedRandom,
-}
-
-impl Default for LoadBalanceStrategy {
-    fn default() -> Self {
-        LoadBalanceStrategy::ConsistentHash
-    }
 }
 
 impl std::str::FromStr for LoadBalanceStrategy {

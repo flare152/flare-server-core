@@ -588,41 +588,12 @@ impl ServiceClient {
         use futures::future::poll_fn;
         use tower::Service;
 
-        // Balance 实现了 Service trait
-        // 我们需要先确保 Balance 已经准备好（即已经发现了至少一个服务）
-        // 使用 poll_fn 配合 yield_now 来等待 ready 状态
-        // 这样 Balance 内部的 Discover 才能处理 Stream 事件
-
-        // 尝试最多 100 次（10 秒），每次等待 100ms
-        for _attempt in 0..100 {
-            // 让出执行权，允许 Balance 处理 Discover 的 Stream 事件
-            tokio::task::yield_now().await;
-
-            // 使用 poll_fn 来检查是否准备好
-            // poll_fn 会在每次 poll 时调用 poll_ready，如果返回 Pending 会继续等待
-            let ready_result = poll_fn(|cx| self.balancer.poll_ready(cx)).await;
-
-            match ready_result {
-                Ok(()) => {
-                    // 服务已经准备好，可以调用
-                    break;
-                }
-                Err(e) => {
-                    return Err(format!("Service not ready: {}", e).into());
-                }
-            }
-
-            // 如果还没准备好（这里实际上不会执行，因为 match 的所有分支都会返回或跳出）
-            // 但保留这个 sleep 以防逻辑变化
-            #[allow(unreachable_code)]
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-
-        // 循环结束意味着服务已经准备好（通过 break 跳出）
-        // 再次确认服务准备好（虽然理论上已经准备好了）
+        // Balance 实现了 Service trait。poll_ready 在没有实例时返回 Pending，
+        // 并在 Discover 流送来 Insert 后被唤醒，所以这里一直等到至少有一个实例。
+        // 本方法自身没有上限（见文档），调用方用 timeout 包住。
         poll_fn(|cx| self.balancer.poll_ready(cx))
             .await
-            .map_err(|e| format!("Service not ready after waiting: {}", e))?;
+            .map_err(|e| format!("Service not ready: {}", e))?;
 
         // Balance 的 Request 类型是 ()，Response 是 Channel
         // 调用时会自动选择一个 ChannelService，然后调用其 call(()) 方法返回 Channel
@@ -766,6 +737,38 @@ mod lifecycle_tests {
         })
         .await
         .expect("refresh must exit when its receiver is dropped");
+    }
+
+    /// get_channel 在没有实例时一直挂起（不报错、不自带上限），
+    /// 实例经 Discover 流到达后立刻返回。
+    #[tokio::test]
+    async fn get_channel_waits_for_first_instance_then_returns() {
+        let backend = Arc::new(FakeBackend {
+            initial: vec![],
+            calls: AtomicUsize::new(0),
+            block_refresh: false,
+        });
+        let (discover, updater) = ServiceDiscover::from_backend(backend, config(3600))
+            .await
+            .unwrap();
+        let mut client = ServiceClient::new(discover);
+        let pending = tokio::spawn(async move { client.get_channel().await.map(|_| ()) });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!pending.is_finished(), "no instance yet: must keep waiting");
+
+        let endpoint = Endpoint::from_static("http://127.0.0.1:20001");
+        updater
+            .insert(
+                "node-1",
+                ChannelService::new(endpoint.connect_lazy(), endpoint),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("must return once an instance arrives")
+            .unwrap()
+            .expect("ready balancer yields a channel");
     }
 }
 

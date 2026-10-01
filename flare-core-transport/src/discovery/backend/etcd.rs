@@ -91,24 +91,24 @@ impl DiscoveryBackend for EtcdBackend {
                 for kv in resp.kvs() {
                     if let Ok(instance) = serde_json::from_slice::<ServiceInstance>(kv.value()) {
                         // 过滤命名空间
-                        if let Some(ns) = namespace {
-                            if !instance.matches_namespace(Some(ns)) {
-                                continue;
-                            }
+                        if let Some(ns) = namespace
+                            && !instance.matches_namespace(Some(ns))
+                        {
+                            continue;
                         }
 
                         // 过滤版本
-                        if let Some(ver) = version {
-                            if !instance.matches_version(Some(ver)) {
-                                continue;
-                            }
+                        if let Some(ver) = version
+                            && !instance.matches_version(Some(ver))
+                        {
+                            continue;
                         }
 
                         // 过滤标签
-                        if let Some(tag_filters) = tags {
-                            if !instance.matches_tags(tag_filters) {
-                                continue;
-                            }
+                        if let Some(tag_filters) = tags
+                            && !instance.matches_tags(tag_filters)
+                        {
+                            continue;
                         }
 
                         instances.push(instance);
@@ -155,12 +155,12 @@ impl DiscoveryBackend for EtcdBackend {
 
         if let Ok(resp) = client.get(key_prefix, Some(opts)).await {
             for kv in resp.kvs() {
-                if let Ok(instance) = serde_json::from_slice::<ServiceInstance>(kv.value()) {
-                    if instance.instance_id == instance_id {
-                        let key = String::from_utf8_lossy(kv.key()).to_string();
-                        client.delete(key, None).await?;
-                        return Ok(());
-                    }
+                if let Ok(instance) = serde_json::from_slice::<ServiceInstance>(kv.value())
+                    && instance.instance_id == instance_id
+                {
+                    let key = String::from_utf8_lossy(kv.key()).to_string();
+                    client.delete(key, None).await?;
+                    return Ok(());
                 }
             }
         }
@@ -176,12 +176,12 @@ impl DiscoveryBackend for EtcdBackend {
 
             if let Ok(resp) = client.get(key_prefix, Some(opts)).await {
                 for kv in resp.kvs() {
-                    if let Ok(instance) = serde_json::from_slice::<ServiceInstance>(kv.value()) {
-                        if instance.instance_id == instance_id {
-                            let key = String::from_utf8_lossy(kv.key()).to_string();
-                            client.delete(key, None).await?;
-                            return Ok(());
-                        }
+                    if let Ok(instance) = serde_json::from_slice::<ServiceInstance>(kv.value())
+                        && instance.instance_id == instance_id
+                    {
+                        let key = String::from_utf8_lossy(kv.key()).to_string();
+                        client.delete(key, None).await?;
+                        return Ok(());
                     }
                 }
             }
@@ -244,14 +244,12 @@ impl DiscoveryBackend for EtcdBackend {
                     match stream.message().await {
                         Ok(Some(resp)) => {
                             for event in resp.events() {
-                                if let Some(kv) = event.kv() {
-                                    if let Ok(instance) =
+                                if let Some(kv) = event.kv()
+                                    && let Ok(instance) =
                                         serde_json::from_slice::<ServiceInstance>(kv.value())
-                                    {
-                                        if tx.send(instance).await.is_err() {
-                                            return; // 消费端关闭
-                                        }
-                                    }
+                                    && tx.send(instance).await.is_err()
+                                {
+                                    return; // 消费端关闭
                                 }
                             }
                         }

@@ -88,17 +88,17 @@ pub async fn auth_middleware(
             }
 
             // 注入设备 ID
-            if let Some(device_id) = &claims.device_id {
-                if let Ok(device_id_value) = HeaderValue::from_str(device_id) {
-                    headers.insert(keys::DEVICE_ID, device_id_value);
-                }
+            if let Some(device_id) = &claims.device_id
+                && let Ok(device_id_value) = HeaderValue::from_str(device_id)
+            {
+                headers.insert(keys::DEVICE_ID, device_id_value);
             }
 
             // 注入租户 ID
-            if let Some(tenant_id) = &claims.tenant_id {
-                if let Ok(tenant_id_value) = HeaderValue::from_str(tenant_id) {
-                    headers.insert(keys::TENANT_ID, tenant_id_value);
-                }
+            if let Some(tenant_id) = &claims.tenant_id
+                && let Ok(tenant_id_value) = HeaderValue::from_str(tenant_id)
+            {
+                headers.insert(keys::TENANT_ID, tenant_id_value);
             }
 
             next.run(request).await
@@ -139,9 +139,7 @@ pub async fn optional_auth_middleware(
     };
 
     // 2. 解析 Bearer Token
-    let token = if auth_header.starts_with("Bearer ") {
-        &auth_header[7..]
-    } else {
+    let Some(token) = auth_header.strip_prefix("Bearer ") else {
         // Token 格式错误,但这是可选认证,所以继续执行
         return next.run(request).await;
     };
@@ -163,16 +161,16 @@ pub async fn optional_auth_middleware(
                 headers.insert(keys::USER_ID, user_id);
             }
 
-            if let Some(device_id) = &claims.device_id {
-                if let Ok(device_id_value) = HeaderValue::from_str(device_id) {
-                    headers.insert(keys::DEVICE_ID, device_id_value);
-                }
+            if let Some(device_id) = &claims.device_id
+                && let Ok(device_id_value) = HeaderValue::from_str(device_id)
+            {
+                headers.insert(keys::DEVICE_ID, device_id_value);
             }
 
-            if let Some(tenant_id) = &claims.tenant_id {
-                if let Ok(tenant_id_value) = HeaderValue::from_str(tenant_id) {
-                    headers.insert(keys::TENANT_ID, tenant_id_value);
-                }
+            if let Some(tenant_id) = &claims.tenant_id
+                && let Ok(tenant_id_value) = HeaderValue::from_str(tenant_id)
+            {
+                headers.insert(keys::TENANT_ID, tenant_id_value);
             }
 
             next.run(request).await

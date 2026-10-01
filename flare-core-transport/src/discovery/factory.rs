@@ -261,6 +261,9 @@ pub struct ServiceRegistry {
     #[allow(dead_code)] // 保留用于未来扩展（如动态调整心跳间隔）
     heartbeat_interval: u64,
     shutdown_tx: Option<mpsc::Sender<()>>,
+    /// 心跳任务句柄。注销前必须先终止它并等它真正退出：在途心跳失败会重新注册，
+    /// 晚于注销完成的重新注册会让已下线的实例在注册中心里再挂一个 TTL。
+    heartbeat_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ServiceRegistry {
@@ -290,7 +293,7 @@ impl ServiceRegistry {
         // 启动心跳任务
         // 使用统一的 heartbeat() 方法，各后端自行实现最适合的心跳方式
         // 心跳间隔设置为 TTL 的 1/2，确保在 TTL 过期前至少发送 2 次心跳
-        tokio::spawn(async move {
+        let heartbeat_task = tokio::spawn(async move {
             let mut interval_timer = interval(Duration::from_secs(interval_secs));
             let mut shutdown_rx = shutdown_rx;
             let mut consecutive_failures = 0u64;
@@ -396,7 +399,21 @@ impl ServiceRegistry {
             instance,
             heartbeat_interval,
             shutdown_tx: Some(shutdown_tx),
+            heartbeat_task: Some(heartbeat_task),
         }
+    }
+
+    /// 发出停止信号并终止心跳任务。
+    ///
+    /// 停止信号只在任务回到 `select!` 时才被看到，而在途的心跳（或心跳失败后的重新注册）
+    /// 可能还要跑很久，所以这里直接 abort：被取消的请求即使已落到后端，随后的注销也会把它清掉。
+    fn stop_heartbeat(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.try_send(());
+        }
+        let task = self.heartbeat_task.take()?;
+        task.abort();
+        Some(task)
     }
 
     /// 获取服务实例
@@ -424,12 +441,9 @@ impl ServiceRegistry {
     ///
     /// 应该在服务关闭前显式调用此方法，而不是依赖 Drop
     pub async fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            // 停止心跳任务
-            let _ = shutdown_tx.send(());
-
-            // 等待一小段时间，确保心跳任务已停止
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        if let Some(heartbeat_task) = self.stop_heartbeat() {
+            // 等心跳任务真正退出后再注销，注销之后不会再有心跳或重新注册
+            let _ = heartbeat_task.await;
 
             // 注销服务实例
             let instance_id = self.instance.instance_id.clone();
@@ -459,20 +473,17 @@ impl ServiceRegistry {
 
 impl Drop for ServiceRegistry {
     fn drop(&mut self) {
-        // 如果 shutdown_tx 还存在，说明没有显式调用 shutdown
+        // 如果心跳任务还在，说明没有显式调用 shutdown
         // 尝试在 Drop 中注销（但可能失败，因为 runtime 可能正在关闭）
-        if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            // 停止心跳任务
-            let _ = shutdown_tx.try_send(());
-
+        if let Some(heartbeat_task) = self.stop_heartbeat() {
             // 尝试在 Drop 中注销（使用 try_current 检查 runtime 是否可用）
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let backend = self.backend.clone();
                 let instance_id = self.instance.instance_id.clone();
                 // 使用 spawn 但不等待，因为 Drop 是同步的
                 handle.spawn(async move {
-                    // 短暂延迟，确保心跳任务已停止
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    // 等心跳任务真正退出后再注销
+                    let _ = heartbeat_task.await;
                     match backend.unregister(&instance_id).await {
                         Ok(_) => {
                             tracing::trace!(
@@ -497,5 +508,171 @@ impl Drop for ServiceRegistry {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_shutdown_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    /// 记录调用顺序的后端：第 2 次心跳（首个定时心跳）挂起到测试放行，
+    /// 放行后失败，模拟注销与在途心跳交错时 etcd 租约已被撤销。
+    struct RecordingBackend {
+        events: Mutex<Vec<&'static str>>,
+        heartbeats: AtomicUsize,
+        heartbeat_started: Notify,
+        release_heartbeat: Notify,
+        unregistered: Notify,
+    }
+
+    impl RecordingBackend {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                events: Mutex::new(Vec::new()),
+                heartbeats: AtomicUsize::new(0),
+                heartbeat_started: Notify::new(),
+                release_heartbeat: Notify::new(),
+                unregistered: Notify::new(),
+            })
+        }
+
+        fn events(&self) -> Vec<&'static str> {
+            self.events.lock().unwrap().clone()
+        }
+
+        fn after_unregister(&self) -> Vec<&'static str> {
+            let events = self.events();
+            let at = events
+                .iter()
+                .position(|event| *event == "unregister")
+                .expect("unregister must have been called");
+            events[at + 1..].to_vec()
+        }
+    }
+
+    #[async_trait]
+    impl DiscoveryBackend for RecordingBackend {
+        async fn discover(
+            &self,
+            _service_type: &str,
+            _namespace: Option<&str>,
+            _version: Option<&str>,
+            _tags: Option<&HashMap<String, String>>,
+        ) -> Result<Vec<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(vec![])
+        }
+
+        async fn register(
+            &self,
+            _instance: ServiceInstance,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.events.lock().unwrap().push("register");
+            Ok(())
+        }
+
+        async fn unregister(
+            &self,
+            _instance_id: &str,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.events.lock().unwrap().push("unregister");
+            self.unregistered.notify_one();
+            Ok(())
+        }
+
+        async fn watch(
+            &self,
+            _service_type: &str,
+        ) -> Result<mpsc::Receiver<ServiceInstance>, Box<dyn std::error::Error + Send + Sync>>
+        {
+            Ok(mpsc::channel(1).1)
+        }
+
+        async fn heartbeat(
+            &self,
+            _instance: &ServiceInstance,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let call = self.heartbeats.fetch_add(1, Ordering::SeqCst);
+            self.events.lock().unwrap().push("heartbeat");
+            if call == 0 {
+                return Ok(());
+            }
+            self.heartbeat_started.notify_one();
+            self.release_heartbeat.notified().await;
+            Err("lease revoked".into())
+        }
+    }
+
+    fn instance() -> ServiceInstance {
+        ServiceInstance::new("test", "node-1", "127.0.0.1:20001".parse().unwrap())
+    }
+
+    /// 在途心跳失败后会重新注册；若注销时心跳任务还活着，实例会在注销后重新出现。
+    #[tokio::test]
+    async fn shutdown_stops_heartbeat_before_unregister() {
+        let backend = RecordingBackend::new();
+        let mut registry = ServiceRegistry::new(backend.clone(), instance(), 3600);
+        tokio::time::timeout(Duration::from_secs(5), backend.heartbeat_started.notified())
+            .await
+            .expect("first interval heartbeat must start");
+
+        tokio::time::timeout(Duration::from_secs(5), registry.shutdown())
+            .await
+            .expect("shutdown must not wait for the in-flight heartbeat")
+            .unwrap();
+
+        backend.release_heartbeat.notify_one();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            backend.after_unregister(),
+            Vec::<&str>::new(),
+            "nothing may touch the registry after unregister: {:?}",
+            backend.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_stops_heartbeat_before_unregister() {
+        let backend = RecordingBackend::new();
+        let registry = ServiceRegistry::new(backend.clone(), instance(), 3600);
+        tokio::time::timeout(Duration::from_secs(5), backend.heartbeat_started.notified())
+            .await
+            .expect("first interval heartbeat must start");
+
+        drop(registry);
+        tokio::time::timeout(Duration::from_secs(5), backend.unregistered.notified())
+            .await
+            .expect("drop must unregister in the background");
+
+        backend.release_heartbeat.notify_one();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            backend.after_unregister(),
+            Vec::<&str>::new(),
+            "nothing may touch the registry after unregister: {:?}",
+            backend.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn second_shutdown_is_a_no_op() {
+        let backend = RecordingBackend::new();
+        let mut registry = ServiceRegistry::new(backend.clone(), instance(), 3600);
+        tokio::time::timeout(Duration::from_secs(5), backend.heartbeat_started.notified())
+            .await
+            .expect("first interval heartbeat must start");
+        registry.shutdown().await.unwrap();
+        registry.shutdown().await.unwrap();
+        drop(registry);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let unregisters = backend
+            .events()
+            .iter()
+            .filter(|event| **event == "unregister")
+            .count();
+        assert_eq!(unregisters, 1);
     }
 }

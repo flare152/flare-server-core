@@ -308,10 +308,10 @@ impl DiscoveryBackend for ConsulBackend {
 
         {
             let cache = CONSUL_DISCOVER_CACHE.lock().await;
-            if let Some(entry) = cache.get(&cache_key) {
-                if entry.fetched_at.elapsed() < ttl {
-                    return Ok(entry.instances.clone());
-                }
+            if let Some(entry) = cache.get(&cache_key)
+                && entry.fetched_at.elapsed() < ttl
+            {
+                return Ok(entry.instances.clone());
             }
         }
 
@@ -673,22 +673,22 @@ impl ConsulBackend {
                 "Found service instance from Consul"
             );
 
-            if let Some(ns) = namespace {
-                if !instance.matches_namespace(Some(ns)) {
-                    continue;
-                }
+            if let Some(ns) = namespace
+                && !instance.matches_namespace(Some(ns))
+            {
+                continue;
             }
 
-            if let Some(ver) = version {
-                if !instance.matches_version(Some(ver)) {
-                    continue;
-                }
+            if let Some(ver) = version
+                && !instance.matches_version(Some(ver))
+            {
+                continue;
             }
 
-            if let Some(tag_filters) = tags {
-                if !instance.matches_tags(tag_filters) {
-                    continue;
-                }
+            if let Some(tag_filters) = tags
+                && !instance.matches_tags(tag_filters)
+            {
+                continue;
             }
 
             instances.push(instance);
