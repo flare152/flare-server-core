@@ -74,6 +74,11 @@
   打不了管理接口。`generate_token_with_ttl` 改为其特例,行为不变。
 - `TOKEN_USE_ADMIN = "admin"`:`AuthenticatedPrincipal::from_token_claims` 对该用途派生 `admin:*` scope,
   让核 admin-gateway 能接受本地 HS256 签发的管理令牌(此前 scopes 恒空,任何令牌都 403)。
+- 消费者的 broker 原生重投可配退避：`ConsumerConfig::with_retry_backoff(RetryBackoff)`
+  让 handler 的 Nack 与可重试错误按 `initial · 2^retry_count`（封顶 `max`）延迟重投，
+  `with_max_retries` 设重试上限。`MessageAck` 新增 `nack_with_delay`，默认退化为立即
+  `nack`；JetStream 实现为带延迟的 NAK。未配退避时仍立即重投，行为不变。此前下游停机或
+  重启时连接被拒在毫秒内返回，默认 3 次重试在同一瞬间用完，消息随即进 DLQ。（74f33d7）
 
 ### 修复
 
