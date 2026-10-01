@@ -49,10 +49,46 @@ impl FailureContext {
     }
 }
 
+/// broker 原生重投（NAK）的退避：第 `n` 次重试（首投失败时 `n = 0`）在
+/// `initial · 2^n` 之后重投，封顶 `max`。
+///
+/// 不设退避时 NAK 立即重投：下游停机或重启期间（连接被拒在毫秒级返回），几次重试
+/// 会在同一瞬间用完，消息随即进入 DLQ。设了退避，`max_retries` 次重试才会摊开在一段
+/// 时间里，覆盖下游的重启窗口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryBackoff {
+    pub initial: Duration,
+    pub max: Duration,
+}
+
+impl RetryBackoff {
+    pub fn new(initial: Duration, max: Duration) -> Self {
+        Self { initial, max }
+    }
+
+    /// 第 `retry_count` 次重试前的等待（`retry_count` 为此前已重投的次数）。
+    pub fn delay_for(&self, retry_count: u32) -> Duration {
+        let factor = 1u32.checked_shl(retry_count).unwrap_or(u32::MAX);
+        self.initial
+            .checked_mul(factor)
+            .unwrap_or(self.max)
+            .min(self.max)
+    }
+
+    /// 前 `retries` 次重试的等待之和，即消息在用完这些重试之前至少跨越的时长。
+    pub fn total_for(&self, retries: u32) -> Duration {
+        (0..retries).fold(Duration::ZERO, |total, retry_count| {
+            total.saturating_add(self.delay_for(retry_count))
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPolicy {
     pub max_retries: u32,
     pub enable_dlq: bool,
+    /// broker 原生重投的退避；`None` 时 NAK 立即重投（原有行为）。
+    pub backoff: Option<RetryBackoff>,
 }
 
 impl RetryPolicy {
@@ -60,7 +96,18 @@ impl RetryPolicy {
         Self {
             max_retries,
             enable_dlq,
+            backoff: None,
         }
+    }
+
+    pub fn with_backoff(mut self, backoff: RetryBackoff) -> Self {
+        self.backoff = Some(backoff);
+        self
+    }
+
+    /// 第 `retry_count` 次重试交给 broker 原生重投时的延迟；未设退避时为 `None`。
+    pub fn retry_delay(&self, retry_count: u32) -> Option<Duration> {
+        self.backoff.map(|backoff| backoff.delay_for(retry_count))
     }
 
     pub fn action_for_nack(&self, retry_count: u32) -> FailureAction {
@@ -98,7 +145,10 @@ impl RetryPolicy {
 
 impl From<&super::runtime::ConsumerConfig> for RetryPolicy {
     fn from(config: &super::runtime::ConsumerConfig) -> Self {
-        Self::new(config.max_retries, config.enable_dlq)
+        Self {
+            backoff: config.retry_backoff,
+            ..Self::new(config.max_retries, config.enable_dlq)
+        }
     }
 }
 
@@ -471,6 +521,32 @@ mod tests {
             policy.action_for_error(&error, 2),
             FailureAction::DeadLetter
         );
+    }
+
+    #[test]
+    fn retry_backoff_doubles_from_initial_and_caps_at_max() {
+        let backoff = RetryBackoff::new(Duration::from_secs(1), Duration::from_secs(15));
+        let delays = (0..7)
+            .map(|retry_count| backoff.delay_for(retry_count).as_secs())
+            .collect::<Vec<_>>();
+        assert_eq!(delays, vec![1, 2, 4, 8, 15, 15, 15]);
+        // 超出位宽的重试次数不溢出，停在上限。
+        assert_eq!(backoff.delay_for(31), Duration::from_secs(15));
+        assert_eq!(backoff.delay_for(u32::MAX), Duration::from_secs(15));
+        assert_eq!(backoff.total_for(4), Duration::from_secs(15));
+        assert_eq!(backoff.total_for(0), Duration::ZERO);
+
+        let policy = RetryPolicy::new(3, true);
+        assert_eq!(
+            policy.retry_delay(0),
+            None,
+            "no backoff keeps the immediate NAK"
+        );
+        let policy = policy.with_backoff(backoff);
+        assert_eq!(policy.retry_delay(2), Some(Duration::from_secs(4)));
+        // 退避只决定重投的时机，不改变何时进入 DLQ。
+        assert_eq!(policy.action_for_nack(2), FailureAction::Retry);
+        assert_eq!(policy.action_for_nack(3), FailureAction::DeadLetter);
     }
 
     #[test]

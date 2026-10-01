@@ -729,6 +729,17 @@ impl MessageAck for NatsMessageAck {
         result
     }
 
+    async fn nack_with_delay(&self, delay: std::time::Duration) -> Result<(), ConsumerError> {
+        let started_at = Instant::now();
+        let result = self
+            .message
+            .ack_with(jetstream::AckKind::Nak(Some(delay)))
+            .await
+            .map_err(|e| ConsumerError::Connection(e.to_string()));
+        record_nats_process_ack("nack", started_at, &result);
+        result
+    }
+
     async fn term(&self) -> Result<(), ConsumerError> {
         let started_at = Instant::now();
         let result = self
@@ -894,5 +905,115 @@ mod tests {
     fn delivery_attempt_retry_count_maps_redelivery_attempts() {
         assert_eq!(delivery_attempt_retry_count(2), 1);
         assert_eq!(delivery_attempt_retry_count(16), 15);
+    }
+
+    /// 真实 JetStream 上的延迟重投：`nack_with_delay` 让 broker 到期后才重投，`nack` 立即
+    /// 重投；两次重投的 `retry_count` 都按投递次数递增。
+    #[tokio::test]
+    #[ignore = "requires a running NATS JetStream at FLARE_TEST_NATS_URL (default nats://127.0.0.1:4222)"]
+    async fn jetstream_redelivers_a_delayed_nak_only_after_the_delay() {
+        use std::time::{Duration, Instant};
+
+        use super::super::config::{NatsConsumerConfig, NatsStreamSpec};
+        use super::{NatsMessageFetcher, jetstream};
+        use crate::mq::consumer::{Message, MessageFetcher as _};
+
+        struct Config {
+            url: String,
+            stream: NatsStreamSpec,
+        }
+
+        impl NatsConsumerConfig for Config {
+            fn nats_url(&self) -> &str {
+                &self.url
+            }
+            fn consumer_group(&self) -> &str {
+                "delayed-nak-test"
+            }
+            fn enable_manual_ack(&self) -> bool {
+                true
+            }
+            fn batch_size(&self) -> usize {
+                1
+            }
+            fn batch_timeout_ms(&self) -> u64 {
+                200
+            }
+            fn enable_durable(&self) -> bool {
+                false
+            }
+            fn stream_specs(&self) -> Vec<NatsStreamSpec> {
+                vec![self.stream.clone()]
+            }
+        }
+
+        async fn next(fetcher: &mut NatsMessageFetcher) -> Message {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(message) = fetcher.fetch().await.expect("fetch") {
+                    return message;
+                }
+                assert!(Instant::now() < deadline, "no redelivery within 10 s");
+            }
+        }
+
+        let url = std::env::var("FLARE_TEST_NATS_URL")
+            .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let stream_name = format!("FLARE_TEST_DELAYED_NAK_{suffix}");
+        let subject = format!("flare.test.delayed-nak.{suffix}");
+        let config = Config {
+            url: url.clone(),
+            stream: NatsStreamSpec::new(stream_name.clone(), vec![subject.clone()])
+                .with_max_bytes(1024 * 1024),
+        };
+        let mut fetcher = NatsMessageFetcher::new(&config, vec![subject.clone()])
+            .await
+            .expect("fetcher");
+        let js = jetstream::new(async_nats::connect(&url).await.expect("connect"));
+        js.publish(subject, "payload".into())
+            .await
+            .expect("publish")
+            .await
+            .expect("publish ack");
+
+        let first = next(&mut fetcher).await;
+        assert_eq!(first.context.retry_count, 0);
+        let delay = Duration::from_millis(1_500);
+        let naked_at = Instant::now();
+        first
+            .ack_handle
+            .as_ref()
+            .expect("ack handle")
+            .nack_with_delay(delay)
+            .await
+            .expect("delayed nak");
+        let second = next(&mut fetcher).await;
+        let delayed = naked_at.elapsed();
+        assert_eq!(second.context.retry_count, 1);
+
+        let naked_at = Instant::now();
+        second
+            .ack_handle
+            .as_ref()
+            .expect("ack handle")
+            .nack()
+            .await
+            .expect("nak");
+        let third = next(&mut fetcher).await;
+        let immediate = naked_at.elapsed();
+        assert_eq!(third.context.retry_count, 2);
+        third
+            .ack_handle
+            .as_ref()
+            .expect("ack handle")
+            .ack()
+            .await
+            .expect("ack");
+        let _ = js.delete_stream(&stream_name).await;
+
+        println!("delayed nak redelivered after {delayed:?}, plain nak after {immediate:?}");
+        assert!(delayed >= delay, "{delayed:?}");
+        assert!(immediate < delay, "{immediate:?}");
     }
 }

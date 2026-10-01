@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use flare_core_base::context::Ctx;
 
@@ -315,6 +315,12 @@ pub trait MessageAck: Send + Sync {
     async fn ack(&self) -> Result<(), ConsumerError>;
     async fn nack(&self) -> Result<(), ConsumerError>;
     async fn term(&self) -> Result<(), ConsumerError>;
+
+    /// 由 broker 在 `delay` 之后重投。不支持延迟重投的实现退化为立即 [Self::nack]。
+    async fn nack_with_delay(&self, delay: Duration) -> Result<(), ConsumerError> {
+        let _ = delay;
+        self.nack().await
+    }
 
     fn supports_native_retry(&self) -> bool {
         true

@@ -24,8 +24,8 @@ pub use adapter::{MqConsumerAdapter, MqConsumerAdapterBuilder};
 pub use dispatcher::{Dispatcher, RegistryDispatcher, TopicDispatcher};
 pub use failure::{
     ConsumerFailurePublishers, DeadLetterPublisher, FailureAction, FailureContext, FailureTopic,
-    ProducerDeadLetterPublisher, ProducerRetryPublisher, RetryForwarderHandler, RetryPolicy,
-    RetryPublisher,
+    ProducerDeadLetterPublisher, ProducerRetryPublisher, RetryBackoff, RetryForwarderHandler,
+    RetryPolicy, RetryPublisher,
 };
 pub use handler::{HandlerRegistry, MessageHandler};
 pub use runtime::{

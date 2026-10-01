@@ -24,8 +24,8 @@ use super::task::MqConsumer;
 
 use super::dispatcher::Dispatcher;
 use super::failure::{
-    ConsumerFailurePublishers, DeadLetterPublisher, FailureAction, FailureContext, RetryPolicy,
-    RetryPublisher,
+    ConsumerFailurePublishers, DeadLetterPublisher, FailureAction, FailureContext, RetryBackoff,
+    RetryPolicy, RetryPublisher,
 };
 use super::types::{ConsumerError, Message, MessageResult};
 
@@ -98,6 +98,9 @@ pub struct ConsumerConfig {
     pub max_retries: u32,
     /// 是否启用 DLQ
     pub enable_dlq: bool,
+    /// broker 原生重投（NAK）的退避；`None`（默认）时 NAK 立即重投。
+    /// 配了重试发布器（retry topic）的消费者不经过它。
+    pub retry_backoff: Option<RetryBackoff>,
     /// JetStream：覆盖 `JetStreamConsumerConfig::consumer_group`（`None` 时使用传入的 JetStream 配置）
     pub consumer_group_override: Option<String>,
 }
@@ -112,6 +115,7 @@ impl Default for ConsumerConfig {
             idempotent: true,
             max_retries: 3,
             enable_dlq: true,
+            retry_backoff: None,
             consumer_group_override: None,
         }
     }
@@ -155,6 +159,18 @@ impl ConsumerConfig {
 
     pub fn with_idempotent(mut self, idempotent: bool) -> Self {
         self.idempotent = idempotent;
+        self
+    }
+
+    /// 重试次数上限：第 `max_retries` 次重试仍失败后进入 DLQ（未启用 DLQ 时继续重投）。
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    /// broker 原生重投的退避，见 [`RetryBackoff`]。
+    pub fn with_retry_backoff(mut self, backoff: RetryBackoff) -> Self {
+        self.retry_backoff = Some(backoff);
         self
     }
 
@@ -678,6 +694,7 @@ impl ConsumerRuntime {
                     ack_handle.as_ref(),
                     &retry_publisher,
                     &dead_letter_publisher,
+                    &retry_policy,
                     action,
                     failure,
                 )
@@ -708,6 +725,7 @@ impl ConsumerRuntime {
                     ack_handle.as_ref(),
                     &retry_publisher,
                     &dead_letter_publisher,
+                    &retry_policy,
                     action,
                     FailureContext::new("handler_nack", None::<String>, retry_count),
                 )
@@ -721,6 +739,7 @@ impl ConsumerRuntime {
                     ack_handle.as_ref(),
                     &retry_publisher,
                     &dead_letter_publisher,
+                    &retry_policy,
                     action,
                     FailureContext::new("handler_dead_letter", None::<String>, retry_count),
                 )
@@ -831,6 +850,7 @@ impl ConsumerRuntime {
                         ack_handle.as_ref(),
                         &retry_publisher,
                         &dead_letter_publisher,
+                        &retry_policy,
                         action,
                         FailureContext::new("handler_nack", None::<String>, *retry_count),
                     )
@@ -844,6 +864,7 @@ impl ConsumerRuntime {
                         ack_handle.as_ref(),
                         &retry_publisher,
                         &dead_letter_publisher,
+                        &retry_policy,
                         action,
                         FailureContext::new("handler_dead_letter", None::<String>, *retry_count),
                     )
@@ -887,6 +908,7 @@ impl ConsumerRuntime {
                 ack_handle.as_ref(),
                 retry_publisher,
                 dead_letter_publisher,
+                retry_policy,
                 action,
                 FailureContext::from_error("batch_handler_error", error, *retry_count),
             )
@@ -915,6 +937,7 @@ impl ConsumerRuntime {
         ack_handle: Option<&Arc<dyn super::types::MessageAck>>,
         retry_publisher: &Option<Arc<dyn RetryPublisher>>,
         dead_letter_publisher: &Option<Arc<dyn DeadLetterPublisher>>,
+        retry_policy: &RetryPolicy,
         action: FailureAction,
         failure: FailureContext,
     ) -> Result<(), ConsumerError> {
@@ -936,7 +959,10 @@ impl ConsumerRuntime {
                 if let Some(ack) = ack_handle.as_ref()
                     && ack.supports_native_retry()
                 {
-                    return ack.nack().await;
+                    return match retry_policy.retry_delay(failure.retry_count) {
+                        Some(delay) if !delay.is_zero() => ack.nack_with_delay(delay).await,
+                        _ => ack.nack().await,
+                    };
                 }
 
                 Err(ConsumerError::Retry(
@@ -1723,5 +1749,189 @@ mod tests {
         assert_eq!(acked.load(Ordering::SeqCst), 0);
         assert_eq!(nacked.load(Ordering::SeqCst), 1);
         assert_eq!(termed.load(Ordering::SeqCst), 0);
+    }
+
+    /// 记录每次 NAK 请求的重投延迟（`None` 为立即重投）。
+    #[derive(Default)]
+    struct DelayRecordingAck {
+        nacks: std::sync::Mutex<Vec<Option<Duration>>>,
+        termed: AtomicUsize,
+    }
+
+    impl DelayRecordingAck {
+        fn nacks(&self) -> Vec<Option<Duration>> {
+            self.nacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MessageAck for DelayRecordingAck {
+        async fn ack(&self) -> Result<(), ConsumerError> {
+            Ok(())
+        }
+
+        async fn nack(&self) -> Result<(), ConsumerError> {
+            self.nacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(None);
+            Ok(())
+        }
+
+        async fn nack_with_delay(&self, delay: Duration) -> Result<(), ConsumerError> {
+            self.nacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(Some(delay));
+            Ok(())
+        }
+
+        async fn term(&self) -> Result<(), ConsumerError> {
+            self.termed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn redelivered(id: &str, retry_count: u32, ack: Arc<DelayRecordingAck>) -> Message {
+        let mut message = test_message(id, ack);
+        message.context.retry_count = retry_count;
+        message
+    }
+
+    /// 配了退避的消费者：handler 的 Nack 与可重试错误都交给 broker 按 `retry_count`
+    /// 递增的延迟重投；没有配退避的保持立即 NAK。
+    #[tokio::test]
+    async fn native_retry_uses_the_configured_backoff_for_nack_and_retryable_errors() {
+        let backoff = RetryBackoff::new(Duration::from_millis(500), Duration::from_secs(4));
+        let config = ConsumerConfig::new()
+            .with_max_retries(6)
+            .with_retry_backoff(backoff);
+        let policy = RetryPolicy::from(&config);
+        assert_eq!(policy.max_retries, 6);
+
+        let ack = Arc::new(DelayRecordingAck::default());
+        for retry_count in 0..6 {
+            ConsumerRuntime::process_message(
+                Arc::new(ResultDispatcher {
+                    result: MessageResult::Nack,
+                }),
+                redelivered("nack", retry_count, ack.clone()),
+                policy.clone(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("nack is handed back to the broker");
+        }
+        let millis = ack
+            .nacks()
+            .into_iter()
+            .map(|delay| delay.map(|delay| delay.as_millis()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            millis,
+            vec![
+                Some(500),
+                Some(1_000),
+                Some(2_000),
+                Some(4_000),
+                Some(4_000),
+                Some(4_000)
+            ]
+        );
+        assert_eq!(ack.termed.load(Ordering::SeqCst), 0);
+
+        // 批量路径的整批错误同样带退避。
+        let ack = Arc::new(DelayRecordingAck::default());
+        let error_policy = policy.clone();
+        ConsumerRuntime::process_batch(
+            Arc::new(BatchOnlyDispatcher {
+                batch_calls: Arc::new(AtomicUsize::new(0)),
+                fail: true,
+            }),
+            vec![
+                redelivered("batch-a", 0, ack.clone()),
+                redelivered("batch-b", 3, ack.clone()),
+            ],
+            error_policy,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("batch error is handed back to the broker");
+        assert_eq!(
+            ack.nacks(),
+            vec![
+                Some(Duration::from_millis(500)),
+                Some(Duration::from_secs(4))
+            ]
+        );
+
+        // 未配退避：立即 NAK，与原有行为一致。
+        let ack = Arc::new(DelayRecordingAck::default());
+        ConsumerRuntime::process_message(
+            Arc::new(ResultDispatcher {
+                result: MessageResult::Nack,
+            }),
+            redelivered("plain", 1, ack.clone()),
+            RetryPolicy::from(&ConsumerConfig::new()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("nack is handed back to the broker");
+        assert_eq!(ack.nacks(), vec![None]);
+    }
+
+    /// 退避只决定重投时机：用完 `max_retries` 次重试后仍按原规则进入 DLQ。
+    #[tokio::test]
+    async fn backoff_does_not_postpone_the_dead_letter_after_the_last_retry() {
+        let producer = Arc::new(RecordingDeadLetters::default());
+        let config = ConsumerConfig::new()
+            .with_max_retries(2)
+            .with_retry_backoff(RetryBackoff::new(
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ));
+        let ack = Arc::new(DelayRecordingAck::default());
+        let dead_letter: Arc<dyn DeadLetterPublisher> = producer.clone();
+        ConsumerRuntime::process_message(
+            Arc::new(ResultDispatcher {
+                result: MessageResult::Nack,
+            }),
+            redelivered("last", 2, ack.clone()),
+            RetryPolicy::from(&config),
+            None,
+            Some(dead_letter),
+            None,
+        )
+        .await
+        .expect("dead letter published");
+        assert!(ack.nacks().is_empty());
+        assert_eq!(ack.termed.load(Ordering::SeqCst), 1);
+        assert_eq!(producer.published.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Default)]
+    struct RecordingDeadLetters {
+        published: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DeadLetterPublisher for RecordingDeadLetters {
+        async fn publish_dead_letter(
+            &self,
+            _message: &Message,
+            _failure: FailureContext,
+        ) -> Result<(), ConsumerError> {
+            self.published.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
 }
