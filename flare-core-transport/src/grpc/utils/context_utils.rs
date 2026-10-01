@@ -26,15 +26,15 @@ fn merge_request_context<T>(req: &Request<T>) -> Option<Ctx> {
     match (from_extensions, from_metadata) {
         (Some(ext), Some(md)) => {
             let mut merged = (*ext).clone();
-            if merged.user_id().is_none_or(|u| u.is_empty()) {
-                if let Some(uid) = md.user_id().filter(|u| !u.is_empty()) {
-                    merged = merged.with_user_id(uid);
-                }
+            if merged.user_id().is_none_or(|u| u.is_empty())
+                && let Some(uid) = md.user_id().filter(|u| !u.is_empty())
+            {
+                merged = merged.with_user_id(uid);
             }
-            if merged.tenant_id().is_none_or(|t| t.is_empty()) {
-                if let Some(tid) = md.tenant_id().filter(|t| !t.is_empty()) {
-                    merged = merged.with_tenant_id(tid);
-                }
+            if merged.tenant_id().is_none_or(|t| t.is_empty())
+                && let Some(tid) = md.tenant_id().filter(|t| !t.is_empty())
+            {
+                merged = merged.with_tenant_id(tid);
             }
             if merged.trace_id().is_empty() {
                 let trace = md.trace_id();
@@ -42,10 +42,10 @@ fn merge_request_context<T>(req: &Request<T>) -> Option<Ctx> {
                     merged = merged.with_trace_id(trace);
                 }
             }
-            if merged.device_id().is_none_or(|d| d.is_empty()) {
-                if let Some(device) = md.device_id().filter(|d| !d.is_empty()) {
-                    merged = merged.with_device_id(device);
-                }
+            if merged.device_id().is_none_or(|d| d.is_empty())
+                && let Some(device) = md.device_id().filter(|d| !d.is_empty())
+            {
+                merged = merged.with_device_id(device);
             }
             Some(std::sync::Arc::new(merged))
         }

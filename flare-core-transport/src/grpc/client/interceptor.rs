@@ -69,8 +69,10 @@ impl ClientContextInterceptor {
     pub fn new(config: ClientContextConfig) -> Self {
         Self { config }
     }
+}
 
-    pub fn default() -> Self {
+impl Default for ClientContextInterceptor {
+    fn default() -> Self {
         Self::new(ClientContextConfig::default())
     }
 }
@@ -82,10 +84,10 @@ impl Interceptor for ClientContextInterceptor {
             .unwrap_or_else(Context::root);
 
         if let Some(ref default) = self.config.default_context {
-            if ctx.tenant_id().is_none() {
-                if let Some(tid) = default.tenant_id() {
-                    ctx = ctx.with_tenant_id(tid);
-                }
+            if ctx.tenant_id().is_none()
+                && let Some(tid) = default.tenant_id()
+            {
+                ctx = ctx.with_tenant_id(tid);
             }
             if ctx.trace_id().is_empty() {
                 let tid = default.trace_id();
@@ -93,37 +95,37 @@ impl Interceptor for ClientContextInterceptor {
                     ctx = ctx.with_trace_id(tid);
                 }
             }
-            if ctx.user_id().is_none() {
-                if let Some(uid) = default.user_id() {
-                    ctx = ctx.with_user_id(uid);
-                }
+            if ctx.user_id().is_none()
+                && let Some(uid) = default.user_id()
+            {
+                ctx = ctx.with_user_id(uid);
             }
-            if ctx.device_id().is_none() {
-                if let Some(did) = default.device_id() {
-                    ctx = ctx.with_device_id(did);
-                }
+            if ctx.device_id().is_none()
+                && let Some(did) = default.device_id()
+            {
+                ctx = ctx.with_device_id(did);
             }
-            if ctx.platform().is_none() {
-                if let Some(p) = default.platform() {
-                    ctx = ctx.with_platform(p);
-                }
+            if ctx.platform().is_none()
+                && let Some(p) = default.platform()
+            {
+                ctx = ctx.with_platform(p);
             }
-            if ctx.session_id().is_none() {
-                if let Some(sid) = default.session_id() {
-                    ctx = ctx.with_session_id(sid);
-                }
+            if ctx.session_id().is_none()
+                && let Some(sid) = default.session_id()
+            {
+                ctx = ctx.with_session_id(sid);
             }
-            if ctx.actor().is_none() {
-                if let Some(actor) = default.actor() {
-                    ctx = ctx.with_actor(actor.clone());
-                }
+            if ctx.actor().is_none()
+                && let Some(actor) = default.actor()
+            {
+                ctx = ctx.with_actor(actor.clone());
             }
         }
 
-        if let Some(ref tenant_id) = self.config.default_tenant_id {
-            if ctx.tenant_id().is_none() {
-                ctx = ctx.with_tenant_id(tenant_id.as_str());
-            }
+        if let Some(ref tenant_id) = self.config.default_tenant_id
+            && ctx.tenant_id().is_none()
+        {
+            ctx = ctx.with_tenant_id(tenant_id.as_str());
         }
 
         if self.config.auto_generate_request_id && ctx.request_id().is_empty() {

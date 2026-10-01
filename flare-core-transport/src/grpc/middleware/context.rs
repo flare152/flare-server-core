@@ -102,12 +102,11 @@ where
             use tonic::metadata::MetadataMap;
             let mut m = MetadataMap::new();
             for (key, value) in req.headers() {
-                if let Ok(k) = key.as_str().parse::<tonic::metadata::MetadataKey<_>>() {
-                    if let Ok(s) = value.to_str() {
-                        if let Ok(v) = s.parse::<tonic::metadata::MetadataValue<_>>() {
-                            m.insert(k, v);
-                        }
-                    }
+                if let Ok(k) = key.as_str().parse::<tonic::metadata::MetadataKey<_>>()
+                    && let Ok(s) = value.to_str()
+                    && let Ok(v) = s.parse::<tonic::metadata::MetadataValue<_>>()
+                {
+                    m.insert(k, v);
                 }
             }
             m

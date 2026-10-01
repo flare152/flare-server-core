@@ -9,66 +9,50 @@ use flare_core_base::context::{ActorContext, ActorType, Context, Ctx, keys};
 
 /// 将 Context 编码到 gRPC Metadata
 pub fn encode_context_to_metadata(metadata: &mut MetadataMap, ctx: &Context) {
-    if !ctx.request_id().is_empty() {
-        if let Ok(val) = ctx
+    if !ctx.request_id().is_empty()
+        && let Ok(val) = ctx
             .request_id()
             .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-        {
-            metadata.insert(keys::REQUEST_ID, val);
-        }
+    {
+        metadata.insert(keys::REQUEST_ID, val);
     }
-    if !ctx.trace_id().is_empty() {
-        if let Ok(val) = ctx
+    if !ctx.trace_id().is_empty()
+        && let Ok(val) = ctx
             .trace_id()
             .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-        {
-            metadata.insert(keys::TRACE_ID, val);
-        }
+    {
+        metadata.insert(keys::TRACE_ID, val);
     }
-    if let Some(tenant_id) = ctx.tenant_id() {
-        if !tenant_id.is_empty() {
-            if let Ok(val) =
-                tenant_id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-            {
-                metadata.insert(keys::TENANT_ID, val);
-            }
-        }
+    if let Some(tenant_id) = ctx.tenant_id()
+        && !tenant_id.is_empty()
+        && let Ok(val) = tenant_id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+    {
+        metadata.insert(keys::TENANT_ID, val);
     }
-    if let Some(user_id) = ctx.user_id() {
-        if !user_id.is_empty() {
-            if let Ok(val) =
-                user_id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-            {
-                metadata.insert(keys::USER_ID, val);
-            }
-        }
+    if let Some(user_id) = ctx.user_id()
+        && !user_id.is_empty()
+        && let Ok(val) = user_id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+    {
+        metadata.insert(keys::USER_ID, val);
     }
-    if let Some(device_id) = ctx.device_id() {
-        if !device_id.is_empty() {
-            if let Ok(val) =
-                device_id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-            {
-                metadata.insert(keys::DEVICE_ID, val);
-            }
-        }
+    if let Some(device_id) = ctx.device_id()
+        && !device_id.is_empty()
+        && let Ok(val) = device_id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+    {
+        metadata.insert(keys::DEVICE_ID, val);
     }
-    if let Some(platform) = ctx.platform() {
-        if !platform.is_empty() {
-            if let Ok(val) =
-                platform.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-            {
-                metadata.insert(keys::PLATFORM, val);
-            }
-        }
+    if let Some(platform) = ctx.platform()
+        && !platform.is_empty()
+        && let Ok(val) = platform.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+    {
+        metadata.insert(keys::PLATFORM, val);
     }
-    if let Some(session_id) = ctx.session_id() {
-        if !session_id.is_empty() {
-            if let Ok(val) =
-                session_id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-            {
-                metadata.insert(keys::SESSION_ID, val);
-            }
-        }
+    if let Some(session_id) = ctx.session_id()
+        && !session_id.is_empty()
+        && let Ok(val) =
+            session_id.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+    {
+        metadata.insert(keys::SESSION_ID, val);
     }
     if let Some(actor) = ctx.actor() {
         encode_actor_to_metadata(metadata, actor);
@@ -143,45 +127,40 @@ pub fn decode_context_from_metadata(metadata: &MetadataMap) -> Option<Ctx> {
 }
 
 fn encode_actor_to_metadata(metadata: &mut MetadataMap, actor: &ActorContext) {
-    if !actor.actor_id().is_empty() {
-        if let Ok(val) = actor
+    if !actor.actor_id().is_empty()
+        && let Ok(val) = actor
             .actor_id()
             .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-        {
-            metadata.insert(keys::ACTOR_ID, val.clone());
-            if actor.actor_type == ActorType::User {
-                metadata.insert(keys::USER_ID, val);
-            }
+    {
+        metadata.insert(keys::ACTOR_ID, val.clone());
+        if actor.actor_type == ActorType::User {
+            metadata.insert(keys::USER_ID, val);
         }
     }
-    if actor.actor_type != ActorType::Unspecified {
-        if let Ok(val) = format!("{}", i32::from(actor.actor_type))
+    if actor.actor_type != ActorType::Unspecified
+        && let Ok(val) = format!("{}", i32::from(actor.actor_type))
             .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-        {
-            metadata.insert(keys::ACTOR_TYPE, val);
-        }
+    {
+        metadata.insert(keys::ACTOR_TYPE, val);
     }
     for role in actor.roles().iter() {
-        if !role.is_empty() {
-            if let Ok(val) = role
+        if !role.is_empty()
+            && let Ok(val) = role
                 .as_ref()
                 .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-            {
-                metadata.append("x-actor-roles", val);
-            }
+        {
+            metadata.append("x-actor-roles", val);
         }
     }
     for (key, value) in actor.attributes().iter() {
         let header_name = format!("x-actor-attr-{}", key.as_ref());
         if let Ok(key_val) =
             header_name.parse::<tonic::metadata::MetadataKey<tonic::metadata::Ascii>>()
-        {
-            if let Ok(val) = value
+            && let Ok(val) = value
                 .as_ref()
                 .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
-            {
-                metadata.insert(key_val, val);
-            }
+        {
+            metadata.insert(key_val, val);
         }
     }
 }
@@ -204,23 +183,19 @@ fn decode_actor_from_metadata(metadata: &MetadataMap) -> Option<ActorContext> {
     let mut actor = ActorContext::new(actor_id).with_type(actor_type);
 
     for val in metadata.get_all("x-actor-roles") {
-        if let Ok(role) = val.to_str() {
-            if !role.is_empty() {
-                actor = actor.with_role(role);
-            }
+        if let Ok(role) = val.to_str()
+            && !role.is_empty()
+        {
+            actor = actor.with_role(role);
         }
     }
 
     for entry in metadata.iter() {
-        match entry {
-            tonic::metadata::KeyAndValueRef::Ascii(key, value) => {
-                if let Some(key_str) = key.as_str().strip_prefix("x-actor-attr-") {
-                    if let Ok(value_str) = value.to_str() {
-                        actor = actor.with_attribute(key_str, value_str);
-                    }
-                }
-            }
-            _ => {}
+        if let tonic::metadata::KeyAndValueRef::Ascii(key, value) = entry
+            && let Some(key_str) = key.as_str().strip_prefix("x-actor-attr-")
+            && let Ok(value_str) = value.to_str()
+        {
+            actor = actor.with_attribute(key_str, value_str);
         }
     }
 
