@@ -79,6 +79,11 @@
   `with_max_retries` 设重试上限。`MessageAck` 新增 `nack_with_delay`，默认退化为立即
   `nack`；JetStream 实现为带延迟的 NAK。未配退避时仍立即重投，行为不变。此前下游停机或
   重启时连接被拒在毫秒内返回，默认 3 次重试在同一瞬间用完，消息随即进 DLQ。（74f33d7）
+- `AuthError::expired_token` / `AuthError::is_expired_token` 与 `TOKEN_EXPIRED_REASON`：
+  表示「签名与签发方都对、只是过期」的令牌结论，仍是 `InvalidToken`（说明以 `TOKEN_EXPIRED`
+  开头），不新增变体，调用方对 `AuthError` 的穷举匹配不受影响。
+  `CompositeTokenValidator::is_expired` 判断令牌是否只是过期（主 TokenService 或受信 issuer
+  能验过签名，撤销照查），`CoreJwtTokenValidator` 据此给出过期结论。
 
 ### 修复
 
@@ -103,6 +108,13 @@
   停止信号写成 `let _ = shutdown_tx.send(())`，future 从未被执行，心跳任务在注销期间
   照常运行；在途心跳失败会触发重新注册，实例在注销之后又出现在注册中心，直到 TTL
   过期。（68d9c13）
+- `ChainedTokenValidator`：本地层验过签名、判定令牌过期，而 hook 层此时不可用时，返回过期结论，
+  不再合并成 `ProviderUnavailable`。此前 hook 一挂，带过期令牌的客户端拿到的是可重试的「服务
+  暂不可用」，只会带着同一枚令牌一直退避重连、不去刷新。本地不认、hook 不可用时仍是
+  `ProviderUnavailable`。
+- `HttpHookTokenValidator`：hook 返回 `active` 却没有（或只有空白的）`user_id` 时报
+  `Forbidden`，不再报 `ProviderUnavailable`。这是 hook 对这枚令牌的结论（或契约错误），
+  按可重试处理会让客户端无限重试。
 
 ### 其他
 

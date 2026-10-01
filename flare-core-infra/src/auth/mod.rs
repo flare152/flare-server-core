@@ -10,7 +10,9 @@ pub use issuer::{
     CoreJwtTokenIssuer, HttpHookTokenIssuer, IssuedToken, TokenIssueRequest, TokenIssuer,
     build_token_issuer,
 };
-pub use principal::{AuthError, AuthenticatedPrincipal, TokenValidationRequest, TokenValidator};
+pub use principal::{
+    AuthError, AuthenticatedPrincipal, TOKEN_EXPIRED_REASON, TokenValidationRequest, TokenValidator,
+};
 pub use provider::{
     AppCredential, AuthProviderConfig, AuthProviderMode, ChainedTokenValidator,
     CoreJwtTokenValidator, HttpHookTokenValidator, TrustedIssuerConfig,

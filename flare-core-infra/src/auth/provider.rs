@@ -147,10 +147,15 @@ impl TokenValidator for CoreJwtTokenValidator {
         &self,
         request: TokenValidationRequest,
     ) -> std::result::Result<AuthenticatedPrincipal, AuthError> {
-        let claims = self
-            .validator
-            .validate_token(&request.token)
-            .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
+        let claims = match self.validator.validate_token(&request.token) {
+            Ok(claims) => claims,
+            // 签名与签发方都对、只是过期了：给出可识别的过期结论，链式校验据此不让「hook 不可用」
+            // 盖掉它，客户端会去换令牌，而不是带着过期令牌一直退避重连。
+            Err(err) if self.validator.is_expired(&request.token) => {
+                return Err(AuthError::expired_token(err));
+            }
+            Err(err) => return Err(AuthError::InvalidToken(err.to_string())),
+        };
         // This validator protects normal user API routes. A refresh or control
         // token has a valid signature but must never become a User principal.
         // Legacy access tokens omit token_use; preserve that documented case.
@@ -276,8 +281,10 @@ impl HookValidationResponse {
             .user_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+            // hook 认了这枚令牌却给不出用户：这是 hook 的结论（或契约错误），不是暂时不可用。
+            // 报成 ProviderUnavailable 会让客户端带着同一枚令牌无限退避重连。
             .ok_or_else(|| {
-                AuthError::ProviderUnavailable(
+                AuthError::Forbidden(
                     "auth hook returned active principal without user_id".to_string(),
                 )
             })?;
@@ -304,8 +311,10 @@ impl HookValidationResponse {
 /// - 某层 `Forbidden`/`MissingToken`：立即返回（身份已识别但不允许 / 压根没 token，无需再试）。
 /// - 某层 `InvalidToken`：这层不认这枚 token，继续下一层。
 /// - 某层 `ProviderUnavailable`：这层（多为 hook）暂时不可用，记下后继续下一层。
-/// - 全部失败：只要有过 `ProviderUnavailable` 就返回它（可重试，别把「没验成」误判成「非法」把可能合法的三方 token 永久拒掉）；
-///   否则返回最后一次 `InvalidToken`。
+/// - 全部失败：有层给出过过期结论（[`AuthError::is_expired_token`]，本地层验过签名、只是过期）就
+///   返回它，客户端据此换令牌；否则只要有过 `ProviderUnavailable` 就返回它（可重试，别把「没验成」
+///   误判成「非法」把可能合法的三方 token 永久拒掉）；否则返回最后一次 `InvalidToken`。以前过期结论
+///   也被 `ProviderUnavailable` 盖掉，hook 一挂，客户端就带着过期令牌一直退避重连、不去刷新。
 #[derive(Clone)]
 pub struct ChainedTokenValidator {
     layers: Vec<Arc<dyn TokenValidator>>,
@@ -323,19 +332,26 @@ impl TokenValidator for ChainedTokenValidator {
         &self,
         request: TokenValidationRequest,
     ) -> std::result::Result<AuthenticatedPrincipal, AuthError> {
+        let mut expired: Option<AuthError> = None;
         let mut last_invalid: Option<AuthError> = None;
         let mut had_unavailable: Option<AuthError> = None;
         for layer in &self.layers {
             match layer.validate(request.clone()).await {
                 Ok(principal) => return Ok(principal),
                 Err(err @ (AuthError::Forbidden(_) | AuthError::MissingToken)) => return Err(err),
+                Err(err @ AuthError::InvalidToken(_)) if err.is_expired_token() => {
+                    expired.get_or_insert(err);
+                }
                 Err(err @ AuthError::InvalidToken(_)) => last_invalid = Some(err),
                 Err(err @ AuthError::ProviderUnavailable(_)) => had_unavailable = Some(err),
             }
         }
-        Err(had_unavailable.or(last_invalid).unwrap_or_else(|| {
-            AuthError::InvalidToken("no validator accepted the token".to_string())
-        }))
+        Err(expired
+            .or(had_unavailable)
+            .or(last_invalid)
+            .unwrap_or_else(|| {
+                AuthError::InvalidToken("no validator accepted the token".to_string())
+            }))
     }
 }
 
@@ -392,6 +408,7 @@ pub fn build_http_hook_token_validator(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{TOKEN_EXPIRED_REASON, TokenClaims};
     use super::*;
 
     #[test]
@@ -515,6 +532,133 @@ mod tests {
             chain.validate(req("3p-tok")).await.unwrap_err(),
             AuthError::ProviderUnavailable(_)
         ));
+    }
+
+    /// 每次都不可用的 hook（StubValidator 的预置错误只用一次）。
+    struct DownHook;
+
+    #[async_trait]
+    impl TokenValidator for DownHook {
+        async fn validate(
+            &self,
+            _request: TokenValidationRequest,
+        ) -> std::result::Result<AuthenticatedPrincipal, AuthError> {
+            Err(AuthError::ProviderUnavailable("hook down".into()))
+        }
+    }
+
+    fn unavailable_hook() -> Arc<dyn TokenValidator> {
+        Arc::new(DownHook)
+    }
+
+    /// 本地签发、签名有效但已过期 100 s 的令牌（超过 jsonwebtoken 默认 60 s 的容差）。
+    fn expired_core_token(secret: &str) -> String {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        encode(
+            &Header::default(),
+            &TokenClaims {
+                sub: "user-a".into(),
+                iss: "flare-im-core".into(),
+                exp: now - 100,
+                iat: now - 200,
+                jti: "j-expired".into(),
+                device_id: None,
+                tenant_id: Some("tenant-a".into()),
+                token_use: None,
+            },
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    /// 本地层验过签名、判定过期，hook 此时不可用：保留过期结论（客户端去换令牌），不能被
+    /// ProviderUnavailable 盖掉——那样客户端会带着过期令牌一直退避重连。
+    #[tokio::test]
+    async fn chained_keeps_the_local_expiry_verdict_when_the_hook_is_down() {
+        let secret = "a-strong-shared-secret-with-more-than-32-bytes!";
+        let token_service = Arc::new(TokenService::new(secret, "flare-im-core", 3600));
+        let local = Arc::new(CoreJwtTokenValidator::new(CompositeTokenValidator::new(
+            token_service,
+        )));
+        let expired = expired_core_token(secret);
+
+        let err = local.validate(req(&expired)).await.unwrap_err();
+        assert!(err.is_expired_token(), "{err}");
+
+        let chain = ChainedTokenValidator::new(vec![local, unavailable_hook()]);
+        let err = chain.validate(req(&expired)).await.unwrap_err();
+        assert!(
+            matches!(&err, AuthError::InvalidToken(_)) && err.is_expired_token(),
+            "{err}"
+        );
+
+        // 本地不认（别家签名的令牌）且 hook 不可用：仍是可重试的 ProviderUnavailable
+        let foreign = expired_core_token("another-secret-with-more-than-32-bytes-long!!");
+        let err = chain.validate(req(&foreign)).await.unwrap_err();
+        assert!(matches!(err, AuthError::ProviderUnavailable(_)), "{err}");
+    }
+
+    /// 过期结论只认签名有效的本地令牌：被篡改、乱码、别家签名的都不是「过期」。
+    #[tokio::test]
+    async fn only_signature_valid_tokens_are_reported_as_expired() {
+        let secret = "a-strong-shared-secret-with-more-than-32-bytes!";
+        let token_service = Arc::new(TokenService::new(secret, "flare-im-core", 3600));
+        let composite = CompositeTokenValidator::new(token_service.clone()).with_trusted_issuer(
+            "social-secret-with-more-than-32-bytes-long!",
+            "flare-social",
+        );
+        let local = CoreJwtTokenValidator::new(composite.clone());
+
+        assert!(composite.is_expired(&expired_core_token(secret)));
+        let live = token_service
+            .generate_token("user-a", None, Some("tenant-a"))
+            .unwrap();
+        assert!(!composite.is_expired(&live));
+        for token in [
+            "garbage".to_string(),
+            expired_core_token("another-secret-with-more-than-32-bytes-long!!"),
+        ] {
+            assert!(!composite.is_expired(&token));
+            let err = local.validate(req(&token)).await.unwrap_err();
+            assert!(
+                matches!(&err, AuthError::InvalidToken(_)) && !err.is_expired_token(),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_token_marker_is_a_prefix_token() {
+        assert!(AuthError::expired_token("ExpiredSignature").is_expired_token());
+        assert!(AuthError::InvalidToken(TOKEN_EXPIRED_REASON.into()).is_expired_token());
+        assert!(!AuthError::InvalidToken("TOKEN_EXPIREDX".into()).is_expired_token());
+        assert!(
+            !AuthError::InvalidToken("invalid token: ExpiredSignature".into()).is_expired_token()
+        );
+        assert!(!AuthError::ProviderUnavailable("TOKEN_EXPIRED".into()).is_expired_token());
+    }
+
+    /// hook 认了令牌却没给 user_id：是确定的拒绝（Forbidden），不是可重试的不可用。
+    #[test]
+    fn hook_active_principal_without_user_id_is_forbidden() {
+        for user_id in [None, Some("   ".to_string())] {
+            let response = HookValidationResponse {
+                active: true,
+                user_id,
+                tenant_id: Some("tenant-a".to_string()),
+                device_id: None,
+                app_id: None,
+                expires_at: None,
+                scopes: Vec::new(),
+                metadata: HashMap::new(),
+            };
+            let err = response.into_principal().unwrap_err();
+            assert!(matches!(err, AuthError::Forbidden(_)), "{err}");
+        }
     }
 
     #[tokio::test]

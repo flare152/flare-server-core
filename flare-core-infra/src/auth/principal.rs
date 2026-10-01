@@ -80,6 +80,30 @@ pub enum AuthError {
     ProviderUnavailable(String),
 }
 
+/// [`AuthError::InvalidToken`] 里表示「签名与签发方都对，只是已过期」的类型化原因前缀。
+pub const TOKEN_EXPIRED_REASON: &str = "TOKEN_EXPIRED";
+
+impl AuthError {
+    /// 令牌签名与签发方都对、只是已过期：这是对令牌的确定结论，客户端应换一枚新令牌。
+    ///
+    /// 仍是 [`AuthError::InvalidToken`]（不新增变体，免得破坏调用方对本枚举的穷举匹配），
+    /// 说明以 [`TOKEN_EXPIRED_REASON`] 开头，用 [`Self::is_expired_token`] 识别。
+    pub fn expired_token(detail: impl std::fmt::Display) -> Self {
+        AuthError::InvalidToken(format!("{TOKEN_EXPIRED_REASON}: {detail}"))
+    }
+
+    /// 是否为 [`Self::expired_token`] 给出的过期结论。
+    pub fn is_expired_token(&self) -> bool {
+        matches!(
+            self,
+            AuthError::InvalidToken(detail)
+                if detail
+                    .strip_prefix(TOKEN_EXPIRED_REASON)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        )
+    }
+}
+
 #[async_trait]
 pub trait TokenValidator: Send + Sync {
     async fn validate(

@@ -34,6 +34,16 @@ impl TrustedIssuer {
             .map(|data| data.claims)
             .map_err(|err| anyhow!("invalid token for issuer {}: {err}", self.issuer))
     }
+
+    /// 校验签名与签发方，但不看 `exp`。
+    fn decode_allow_expired(&self, token: &str) -> Result<TokenClaims> {
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_issuer(&[self.issuer.as_str()]);
+        validation.validate_exp = false;
+        decode::<TokenClaims>(token, &self.decoding_key, &validation)
+            .map(|data| data.claims)
+            .map_err(|err| anyhow!("invalid token for issuer {}: {err}", self.issuer))
+    }
 }
 
 /// 主 TokenService + 可选额外 issuer，用于 IM 长连接等多来源 JWT 校验。
@@ -81,6 +91,22 @@ impl CompositeTokenValidator {
         // it with a generic message made reconnect failures impossible to
         // diagnose from the gateway log.
         Err(last_err.unwrap_or(primary_err))
+    }
+
+    /// 令牌是否只是过期了：签名与签发方能被主 TokenService 或某个受信 issuer 验过（主服务照查
+    /// 撤销），`exp` 已经过去。被撤销、签名不对、签发方不认的令牌都不算。
+    pub fn is_expired(&self, token: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        let expired = |claims: TokenClaims| (claims.exp as u64) <= now;
+        if let Ok(claims) = self.primary.decode_claims_allow_expired(token) {
+            return expired(claims);
+        }
+        self.trusted
+            .iter()
+            .any(|trusted| trusted.decode_allow_expired(token).is_ok_and(&expired))
     }
 }
 
