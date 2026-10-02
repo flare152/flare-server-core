@@ -87,6 +87,11 @@
 
 ### 修复
 
+- `build_nats_consumer_tasks*` 按流拆分消费者时保留服务配置里 `ack_wait_secs`、
+  `max_deliver`、`max_ack_pending` 与 `deliver_from_new` 的覆盖。此前拆分后只带连接、
+  分组、批量与 durable 几项，这四项一律回到 `NatsConsumerConfig` 的默认值（30 s、16、
+  按批量推算、`false`），服务声明的值不生效；直接用 `NatsMessageFetcher::new` 的消费者
+  不受影响。
 - 服务发现的初始快照超过内部队列容量（16）时构造会阻塞：初始实例改为先缓存、
   由消费方读取，单次初始快照上限 4096 个实例；发现器销毁时取消挂起的定时刷新并释放
   后端。（c143f19）

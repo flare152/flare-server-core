@@ -35,6 +35,10 @@ pub struct NatsMessageFetcher {
     manual_ack: bool,
 }
 
+/// 按流拆分后单个 JetStream 消费者的配置：除流规格外，服务配置里的每一项（含 trait 默认值
+/// 之外的覆盖）原样带过来。以前只带了连接、分组、批量与 durable 几项，`ack_wait_secs`、
+/// `max_deliver`、`max_ack_pending`、`deliver_from_new` 的覆盖在这里被换回 trait 默认值，
+/// 经 `build_nats_consumer_tasks*` 建出的消费者用不上服务自己的设置。
 #[derive(Debug, Clone)]
 struct ResolvedNatsConsumerConfig {
     nats_url: String,
@@ -42,7 +46,11 @@ struct ResolvedNatsConsumerConfig {
     manual_ack: bool,
     batch_size: usize,
     batch_timeout_ms: u64,
+    ack_wait_secs: u64,
+    max_deliver: i64,
+    max_ack_pending: i64,
     durable: bool,
+    deliver_from_new: bool,
     stream: NatsStreamSpec,
 }
 
@@ -57,7 +65,11 @@ impl ResolvedNatsConsumerConfig {
             manual_ack: config.enable_manual_ack(),
             batch_size: config.batch_size(),
             batch_timeout_ms: config.batch_timeout_ms(),
+            ack_wait_secs: config.ack_wait_secs(),
+            max_deliver: config.max_deliver(),
+            max_ack_pending: config.max_ack_pending(),
             durable: config.enable_durable(),
+            deliver_from_new: config.deliver_from_new(),
             stream,
         }
     }
@@ -84,8 +96,24 @@ impl NatsConsumerConfig for ResolvedNatsConsumerConfig {
         self.batch_timeout_ms
     }
 
+    fn ack_wait_secs(&self) -> u64 {
+        self.ack_wait_secs
+    }
+
+    fn max_deliver(&self) -> i64 {
+        self.max_deliver
+    }
+
+    fn max_ack_pending(&self) -> i64 {
+        self.max_ack_pending
+    }
+
     fn enable_durable(&self) -> bool {
         self.durable
+    }
+
+    fn deliver_from_new(&self) -> bool {
+        self.deliver_from_new
     }
 
     fn stream_specs(&self) -> Vec<NatsStreamSpec> {
@@ -848,6 +876,65 @@ impl Default for NatsConsumerBuilder {
 #[cfg(test)]
 mod tests {
     use super::{durable_consumer_name, sanitize_task_part};
+
+    /// 按流拆分时保留服务配置的全部设置：`max_deliver` 等覆盖若被换回 trait 默认值，
+    /// 经 `build_nats_consumer_tasks*` 建出的 JetStream 消费者就和服务声明的不一致
+    /// （例如重投上限比运行时的重试预算小，消息先被 broker 停投、既不送达也不进 DLQ）。
+    #[test]
+    fn resolved_per_stream_config_keeps_every_consumer_override() {
+        use super::super::config::{NatsConsumerConfig, NatsStreamSpec};
+        use super::ResolvedNatsConsumerConfig;
+
+        struct Overriding;
+
+        impl NatsConsumerConfig for Overriding {
+            fn nats_url(&self) -> &str {
+                "nats://127.0.0.1:4222"
+            }
+            fn consumer_group(&self) -> &str {
+                "overriding"
+            }
+            fn enable_manual_ack(&self) -> bool {
+                true
+            }
+            fn batch_size(&self) -> usize {
+                8
+            }
+            fn batch_timeout_ms(&self) -> u64 {
+                250
+            }
+            fn ack_wait_secs(&self) -> u64 {
+                95
+            }
+            fn max_deliver(&self) -> i64 {
+                40
+            }
+            fn max_ack_pending(&self) -> i64 {
+                77
+            }
+            fn enable_durable(&self) -> bool {
+                true
+            }
+            fn deliver_from_new(&self) -> bool {
+                true
+            }
+        }
+
+        let stream = NatsStreamSpec::new("FLARE_TEST", vec!["flare.test.*".to_string()]);
+        let resolved = ResolvedNatsConsumerConfig::from_config(&Overriding, stream.clone());
+
+        assert_eq!(resolved.nats_url(), Overriding.nats_url());
+        assert_eq!(resolved.consumer_group(), Overriding.consumer_group());
+        assert_eq!(resolved.enable_manual_ack(), Overriding.enable_manual_ack());
+        assert_eq!(resolved.batch_size(), Overriding.batch_size());
+        assert_eq!(resolved.batch_timeout_ms(), Overriding.batch_timeout_ms());
+        assert_eq!(resolved.ack_wait_secs(), 95);
+        assert_eq!(resolved.max_deliver(), 40);
+        assert_eq!(resolved.max_ack_pending(), 77);
+        assert_eq!(resolved.enable_durable(), Overriding.enable_durable());
+        assert!(resolved.deliver_from_new());
+        assert_eq!(resolved.stream_specs(), vec![stream]);
+    }
 
     /// 陈旧 durable 的识别只能靠 `consumer_<组>_<流>_` 前缀，
     /// 而且必须**只**匹配同组同流——误删别的消费组的 durable
