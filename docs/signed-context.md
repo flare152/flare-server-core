@@ -48,3 +48,26 @@ let service = SignedContextLayer::new(verifier).layer(grpc_service);
 同一令牌在 60 秒内允许转发和重试，所以通用校验层不把 jti 当成一次性消费标记。
 对有副作用的命令，应用层仍需用 jti 或明确的幂等键处理重复调用；传输层私网/TLS
 与最小角色授权仍是这段重放窗口的安全边界。
+
+## 迁移中的服务：签名优先（`SignedFirstContextLayer`）
+
+还有调用方只发裸 `x-tenant-id` / `x-user-id` 的服务（例如 Core 的会话读、Storage Reader 与
+同步），用 `SignedFirstContextLayer` 代替 `ContextLayer`：
+
+- 带一个 `x-flare-ctx` 时验签，身份只取自声明；同时带来的裸 `x-tenant-id`、`x-user-id`、
+  `x-actor-id`、`x-actor-type`、`x-actor-roles` 必须与声明一致（`service`、`system` 没有用户，
+  带 `x-user-id` 即不一致），否则 `PERMISSION_DENIED`。通过后与 `SignedContextLayer` 一样剥离
+  裸身份头，`VerifiedContext::token()` 可供下游转发。
+- 默认只收 `user`、`tenant_admin`、`service` 三类 actor（`allow_actor_types` 可改），其余
+  `PERMISSION_DENIED`；验签失败、重复或伪造的令牌 `UNAUTHENTICATED`。
+- 不带令牌：`require_signed(true)` 时 `UNAUTHENTICATED`；否则沿用元数据身份，与
+  `ContextLayer::allow_missing` 相同。
+- 没有验证器（未配公钥）：要求签名时一律 `UNAVAILABLE`；不要求时令牌无法校验、不带来任何
+  身份，仍按元数据，与未装这一层时相同。
+- `exempt_method("/pkg.Service/Method")` 标出由处理器自行鉴权的方法（如只认转发的 admin
+  令牌的管理检索），它们沿用元数据上下文，不要求签名。
+
+调用方转发已验签的入站身份用 `forward_signed_context(&mut request, &ctx)`：只有经验签建立的
+Context 才带令牌，元数据身份或匿名上下文不转发任何东西。与 `request_with_context` 配合时，
+元数据即签名身份，接收方不会判为冲突；从已验证上下文派生出别的租户或用户再转发，接收方会拒绝。
+

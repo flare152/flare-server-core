@@ -53,6 +53,12 @@
   可选凭据 ID、request ID 与 jti。服务端剥离裸 `x-actor-*`、`x-user-id`、`x-tenant-id`
   等身份头，已验证的上下文不会再被元数据回填覆盖；未迁移的服务仍走原 `ContextLayer`。
   见 `docs/signed-context.md`。（bf15224）
+- 签名优先的 gRPC 服务端层 `SignedFirstContextLayer`，给仍有只发裸 `x-tenant-id` /
+  `x-user-id` 调用方的服务用：带 `x-flare-ctx` 就验签并以声明为准，裸身份头与声明不一致时
+  `PERMISSION_DENIED`，验过后剥离裸身份头；默认只收 user、tenant_admin、service 三类 actor；
+  `require_signed(true)` 时拒绝未签名调用（`UNAUTHENTICATED`，没配验证器时 `UNAVAILABLE`），
+  否则未签名调用沿用元数据身份；`exempt_method` 标出由处理器自行鉴权的方法。客户端
+  `forward_signed_context` 原样转发已验签上下文里的令牌。见 `docs/signed-context.md`。
 - 动态负载均衡通道：`ServiceDiscover::into_balance_channel(fallback, request_timeout)`
   返回一个可克隆的 `discovery::BalancedChannel`（可直接作为 tonic 生成客户端的传输
   层），其节点集合随服务发现的增删刷新，不再固定在首次选中的节点；静态回落地址只在

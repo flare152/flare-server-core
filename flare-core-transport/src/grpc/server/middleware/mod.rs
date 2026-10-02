@@ -17,6 +17,7 @@ pub mod context;
 pub mod rate_limit;
 pub mod retry;
 pub use crate::grpc::middleware::signed_context;
+pub use crate::grpc::middleware::signed_first_context;
 pub mod timeout;
 
 pub use context::{
@@ -29,4 +30,5 @@ pub use retry::RetryLayer;
 pub use signed_context::{
     SIGNED_CONTEXT_HEADER, SignedContextLayer, SignedContextService, VerifiedContext,
 };
+pub use signed_first_context::{SignedFirstContextLayer, SignedFirstContextService};
 pub use timeout::TimeoutLayer;

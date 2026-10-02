@@ -83,16 +83,17 @@ pub use flare_core_transport::grpc::utils::{
 pub use flare_core_transport::grpc::client::{
     ClientContextConfig, ClientContextInterceptor, SignedContextInterceptor,
     context_interceptor_with_tenant, context_interceptor_with_tenant_and_user,
-    default_context_interceptor, request_with_context, set_context_metadata,
-    set_signed_context_token,
+    default_context_interceptor, forward_signed_context, request_with_context,
+    set_context_metadata, set_signed_context_token,
 };
 
 // gRPC middleware helpers.
 #[cfg(feature = "grpc")]
 pub use flare_core_transport::grpc::middleware::{
-    ContextLayer, ContextService, SignedContextLayer, SignedContextService, VerifiedContext,
-    extract_actor_id, extract_context, extract_request_id, extract_tenant_id, extract_user_id,
-    get_context, require_actor_id, require_request_id, require_tenant_id, require_user_id,
+    ContextLayer, ContextService, SignedContextLayer, SignedContextService,
+    SignedFirstContextLayer, SignedFirstContextService, VerifiedContext, extract_actor_id,
+    extract_context, extract_request_id, extract_tenant_id, extract_user_id, get_context,
+    require_actor_id, require_request_id, require_tenant_id, require_user_id,
 };
 
 // Transport modules.
@@ -164,9 +165,10 @@ pub use flare_core_transport::http::middleware;
 #[cfg(all(feature = "grpc", not(feature = "http")))]
 pub mod middleware {
     pub use flare_core_transport::grpc::middleware::{
-        ContextLayer, ContextService, SignedContextLayer, SignedContextService, VerifiedContext,
-        extract_actor_id, extract_context, extract_request_id, extract_tenant_id, extract_user_id,
-        get_context, require_actor_id, require_request_id, require_tenant_id, require_user_id,
+        ContextLayer, ContextService, SignedContextLayer, SignedContextService,
+        SignedFirstContextLayer, SignedFirstContextService, VerifiedContext, extract_actor_id,
+        extract_context, extract_request_id, extract_tenant_id, extract_user_id, get_context,
+        require_actor_id, require_request_id, require_tenant_id, require_user_id,
     };
 }
 
@@ -176,9 +178,10 @@ pub mod middleware {
     pub use flare_core_transport::http::middleware::*;
     // gRPC middleware.
     pub use flare_core_transport::grpc::middleware::{
-        ContextLayer, ContextService, SignedContextLayer, SignedContextService, VerifiedContext,
-        extract_actor_id, extract_context, extract_request_id, extract_tenant_id, extract_user_id,
-        get_context, require_actor_id, require_request_id, require_tenant_id, require_user_id,
+        ContextLayer, ContextService, SignedContextLayer, SignedContextService,
+        SignedFirstContextLayer, SignedFirstContextService, VerifiedContext, extract_actor_id,
+        extract_context, extract_request_id, extract_tenant_id, extract_user_id, get_context,
+        require_actor_id, require_request_id, require_tenant_id, require_user_id,
     };
 }
 
@@ -188,8 +191,8 @@ pub mod client {
     pub use flare_core_transport::grpc::client::{
         ClientContextConfig, ClientContextInterceptor, SignedContextInterceptor,
         context_interceptor_with_tenant, context_interceptor_with_tenant_and_user,
-        default_context_interceptor, request_with_context, set_context_metadata,
-        set_signed_context_token,
+        default_context_interceptor, forward_signed_context, request_with_context,
+        set_context_metadata, set_signed_context_token,
     };
 }
 
