@@ -62,3 +62,20 @@ versioned, persisted projections; gateways need bounded local lookup/cache
 (TTL1s, version invalidation, fail closed when refresh is unavailable), tenant
 availability gates, and actual endpoint authorization. A SQL fixture or unit
 test is not a containerized business API/revocation/outage test.
+
+## Hash-only snapshot input
+
+`auth::credential_snapshot` adds the transport-neutral storage record and
+validated `CredentialSnapshot`: canonical bounded identifiers, positive BIGINT
+versions, at most1024 unique keys,1MiB total JSON, strict mode/material/scopes/
+expiry/CIDRs. Empty key sets are valid revocation snapshots; consumers must
+persist their watermarks atomically with replacement. `CredentialKeyRecord`
+is explicitly serializable hash-only input, never a token/pepper; validate it
+again before authorization. Unknown/missing JSON fields are rejected, Debug
+redacts material, and validated snapshots expose no mutable records.
+
+Core and Social own their separate PG adapters and signed-worker RPCs; this
+shared module has no Proto/SQLx dependency, lifecycle authority or tenant
+availability fallback. Its four test groups include storage-to-policy roundtrip
+and disabled/revoked rejection. Gateway cache/loaders and Platform endpoints
+remain separate required work.
