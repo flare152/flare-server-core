@@ -2,6 +2,7 @@ pub mod api_key;
 pub mod api_key_policy;
 pub mod composite;
 pub mod credential_snapshot;
+pub mod credential_verifier;
 pub mod issuer;
 pub mod principal;
 pub mod provider;

@@ -79,3 +79,28 @@ shared module has no Proto/SQLx dependency, lifecycle authority or tenant
 availability fallback. Its four test groups include storage-to-policy roundtrip
 and disabled/revoked rejection. Gateway cache/loaders and Platform endpoints
 remain separate required work.
+
+## Bounded local projection verification
+
+`auth::credential_verifier` supplies `LocalCredentialReader` and a fixed-policy
+`CachedApiKeyVerifier`. The business-neutral port accepts only hash-only records
+atomically read with app binding and positive version on the local primary.
+Core/Social own the adapters; neither this module nor the adapters call Control.
+Do not point this reader at a lagging replica. Corrupt/mismatched rows fail closed.
+
+Only selectors/grants are cached, never raw tokens, peppers or accepted identities.
+Each request rechecks secret/mode/pepper fingerprint, exact app/scope, trusted IP
+and UTC expiry after awaited IO. Positive TTL1s, negative TTL100ms,4096 entries,
+64 fixed single-flight shards,16 concurrent cold reads/waiters and250ms timeouts
+bound memory, IO and waiting. TTL begins before IO. An expired entry is never
+used when refresh fails; configuration mismatch/storage failure gives unavailable,
+not a default tenant or End User fallback. No raw record escapes verification.
+
+Eight deterministic/paused-clock groups cover expiry on hits, revoke/disable,
+unknown/malformed/flooded IDs, simultaneous misses, read saturation/timeout,
+capacity eviction and independent request-policy checks. Core/Social additionally
+run real signed gRPC→PG→cached auth→empty revoke/restart tests. The1s bound starts
+at **local projection commit**, not the Control mutation; upstream outbox lag and
+reconciliation must still be measured. Tenant/feature/resource gates must run
+independently on every business request, and Platform must have separate pools/
+bulkheads. Gateway composition and actual Platform endpoints are still unfinished.

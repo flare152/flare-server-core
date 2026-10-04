@@ -81,6 +81,7 @@ prometheus = { workspace = true, optional = true }
 # ===== OpenTelemetry (可选) =====
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tokio-test = "0.4"
 # OTLP 端到端测试的本地收集端（仅测试）。
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic", "trace"] }
