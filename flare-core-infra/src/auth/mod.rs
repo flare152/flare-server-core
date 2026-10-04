@@ -1,4 +1,5 @@
 pub mod api_key;
+pub mod api_key_policy;
 pub mod composite;
 pub mod issuer;
 pub mod principal;
