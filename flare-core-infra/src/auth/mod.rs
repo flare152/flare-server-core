@@ -8,6 +8,7 @@ pub mod principal;
 pub mod provider;
 pub mod store;
 pub mod token;
+pub mod trusted_proxy;
 
 pub use composite::{CompositeTokenValidator, TrustedIssuer};
 pub use issuer::{
