@@ -1,6 +1,7 @@
 pub mod api_key;
 pub mod api_key_policy;
 pub mod composite;
+pub mod credential_budget;
 pub mod credential_snapshot;
 pub mod credential_verifier;
 pub mod issuer;
@@ -30,3 +31,4 @@ pub use token::{
     SignedContextSigner, SignedContextVerifier, TOKEN_USE_ADMIN, TOKEN_USE_CONTROL,
     TOKEN_USE_INTERNAL_CONTEXT, TOKEN_USE_REFRESH, TokenClaims, TokenService,
 };
+pub mod circuit_breaker;
