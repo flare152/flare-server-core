@@ -224,6 +224,7 @@ fn signed_actor_type(actor_type: SignedActorType) -> ActorType {
         SignedActorType::TenantAdmin => ActorType::TenantAdmin,
         SignedActorType::System => ActorType::System,
         SignedActorType::Guest => ActorType::Guest,
+        SignedActorType::Staff => ActorType::Staff,
     }
 }
 

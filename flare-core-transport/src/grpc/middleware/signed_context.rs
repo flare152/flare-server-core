@@ -209,6 +209,7 @@ fn signed_context(claims: &SignedContextClaims, token: &str) -> Ctx {
         SignedActorType::TenantAdmin => ActorType::TenantAdmin,
         SignedActorType::System => ActorType::System,
         SignedActorType::Guest => ActorType::Guest,
+        SignedActorType::Staff => ActorType::Staff,
     };
     let mut actor = ActorContext::new(&claims.actor_id).with_type(actor_type);
     for role in &claims.roles {
@@ -216,6 +217,17 @@ fn signed_context(claims: &SignedContextClaims, token: &str) -> Ctx {
     }
     if let Some(credential_id) = &claims.credential_id {
         actor = actor.with_attribute("credential_id", credential_id);
+    }
+    // Staff grant attributes mirror the signed claims for handlers that only read the actor;
+    // authorization decisions still read `VerifiedContext::claims`.
+    if let Some(org_id) = &claims.org_id {
+        actor = actor.with_attribute("org_id", org_id);
+    }
+    if let Some(permission) = &claims.permission {
+        actor = actor.with_attribute("permission", permission);
+    }
+    if let Some(perm_version) = claims.perm_version {
+        actor = actor.with_attribute("perm_version", perm_version.to_string());
     }
     let mut ctx = Context::with_request_id(&claims.request_id)
         .with_tenant_id(&claims.tenant_id)

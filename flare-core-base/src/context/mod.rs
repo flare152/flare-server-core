@@ -103,6 +103,9 @@ pub enum ActorType {
     TenantAdmin = 3,
     System = 4,
     Guest = 5,
+    /// Platform or organization staff acting through the admin partition (v4 R1-3). Not a
+    /// user of any application: it never carries a `user_id`.
+    Staff = 6,
 }
 
 impl From<i32> for ActorType {
@@ -113,6 +116,7 @@ impl From<i32> for ActorType {
             3 => ActorType::TenantAdmin,
             4 => ActorType::System,
             5 => ActorType::Guest,
+            6 => ActorType::Staff,
             _ => ActorType::Unspecified,
         }
     }

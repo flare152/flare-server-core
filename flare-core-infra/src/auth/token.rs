@@ -228,6 +228,10 @@ pub enum SignedActorType {
     TenantAdmin,
     System,
     Guest,
+    /// Staff signed by the gateway admin partition after it verified a staff session or a
+    /// personal access token. `tenant_id` is the application being administered, or empty for
+    /// platform-scoped work; `org_id`, `permission` and `perm_version` describe the grant.
+    Staff,
 }
 
 /// Identity selected by a trusted caller after it authenticates the original request.
@@ -240,6 +244,12 @@ pub struct SignedContextIdentity {
     pub roles: Vec<String>,
     pub credential_id: Option<String>,
     pub request_id: String,
+    /// Staff only: the organization the staff member belongs to; None for platform staff.
+    pub org_id: Option<String>,
+    /// Staff only: the permission code the admin partition matched for this request.
+    pub permission: Option<String>,
+    /// Staff only: the role bundle version the session was authorized against.
+    pub perm_version: Option<u64>,
 }
 
 impl SignedContextIdentity {
@@ -256,7 +266,24 @@ impl SignedContextIdentity {
             roles: Vec::new(),
             credential_id: None,
             request_id: request_id.into(),
+            org_id: None,
+            permission: None,
+            perm_version: None,
         }
+    }
+
+    /// Staff grant description. The permission is the route's code as the admin partition
+    /// matched it; the receiver still compares it with the operation it serves.
+    pub fn with_staff_grant(
+        mut self,
+        org_id: Option<String>,
+        permission: Option<String>,
+        perm_version: u64,
+    ) -> Self {
+        self.org_id = org_id;
+        self.permission = permission;
+        self.perm_version = Some(perm_version);
+        self
     }
 
     pub fn with_roles(mut self, roles: Vec<String>) -> Self {
@@ -277,8 +304,21 @@ impl SignedContextIdentity {
                 && !value.chars().any(char::is_control)
         }
 
+        let staff = self.actor_type == SignedActorType::Staff;
+        // Platform-scoped staff work has no application: only Staff may carry an empty tenant.
+        let tenant_ok = valid(&self.tenant_id, 256) || (staff && self.tenant_id.is_empty());
+        let grant_ok = if staff {
+            self.org_id.as_deref().is_none_or(|id| valid(id, 256))
+                && self
+                    .permission
+                    .as_deref()
+                    .is_none_or(|code| valid(code, 128))
+        } else {
+            self.org_id.is_none() && self.permission.is_none() && self.perm_version.is_none()
+        };
         if !valid(&self.actor_id, 256)
-            || !valid(&self.tenant_id, 256)
+            || !tenant_ok
+            || !grant_ok
             || !valid(&self.request_id, 128)
             || self
                 .credential_id
@@ -313,6 +353,13 @@ pub struct SignedContextClaims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_id: Option<String>,
     pub request_id: String,
+    /// Staff grant (v4 R1-3); absent on every other actor type and on older tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perm_version: Option<u64>,
 }
 
 impl SignedContextClaims {
@@ -324,6 +371,9 @@ impl SignedContextClaims {
             roles: self.roles.clone(),
             credential_id: self.credential_id.clone(),
             request_id: self.request_id.clone(),
+            org_id: self.org_id.clone(),
+            permission: self.permission.clone(),
+            perm_version: self.perm_version,
         }
         .validate()?;
         if self.sub != self.actor_id
@@ -377,6 +427,9 @@ impl SignedContextSigner {
             roles: identity.roles.clone(),
             credential_id: identity.credential_id.clone(),
             request_id: identity.request_id.clone(),
+            org_id: identity.org_id.clone(),
+            permission: identity.permission.clone(),
+            perm_version: identity.perm_version,
         };
         Ok(encode(&Header::new(Algorithm::EdDSA), &claims, key)?)
     }
@@ -948,6 +1001,97 @@ mod tests {
         assert_eq!(
             jsonwebtoken::decode_header(&token).unwrap().alg,
             Algorithm::EdDSA
+        );
+    }
+
+    #[test]
+    fn staff_identity_carries_its_grant_and_may_be_platform_scoped() {
+        let (signer, verifier) = signed_context_services();
+        let platform = SignedContextIdentity::new(SignedActorType::Staff, "101", "", "request-1")
+            .with_roles(vec!["platform:super_admin".to_owned()])
+            .with_staff_grant(None, Some("im:tenants".to_owned()), 9);
+        let claims = verifier.verify(&signer.sign(&platform).unwrap()).unwrap();
+        assert_eq!(claims.actor_type, SignedActorType::Staff);
+        assert_eq!(claims.tenant_id, "");
+        assert_eq!(claims.org_id, None);
+        assert_eq!(claims.permission.as_deref(), Some("im:tenants"));
+        assert_eq!(claims.perm_version, Some(9));
+        let organization =
+            SignedContextIdentity::new(SignedActorType::Staff, "202", "0", "request-2")
+                .with_staff_grant(Some("1000000000000000001".to_owned()), None, 0)
+                .with_credential_id("pat:17");
+        let claims = verifier
+            .verify(&signer.sign(&organization).unwrap())
+            .unwrap();
+        assert_eq!(claims.org_id.as_deref(), Some("1000000000000000001"));
+        assert_eq!(claims.permission, None);
+        assert_eq!(claims.credential_id.as_deref(), Some("pat:17"));
+    }
+
+    #[test]
+    fn only_staff_may_omit_the_tenant_or_carry_a_grant() {
+        let (signer, _) = signed_context_services();
+        for actor_type in [
+            SignedActorType::User,
+            SignedActorType::Service,
+            SignedActorType::TenantAdmin,
+            SignedActorType::System,
+            SignedActorType::Guest,
+        ] {
+            assert!(
+                signer
+                    .sign(&SignedContextIdentity::new(actor_type, "a", "", "r"))
+                    .is_err(),
+                "{actor_type:?} with an empty tenant"
+            );
+            assert!(
+                signer
+                    .sign(
+                        &SignedContextIdentity::new(actor_type, "a", "t", "r")
+                            .with_staff_grant(None, None, 1)
+                    )
+                    .is_err(),
+                "{actor_type:?} with a staff grant"
+            );
+        }
+        let staff = SignedContextIdentity::new(SignedActorType::Staff, "a", "t", "r");
+        assert!(
+            signer
+                .sign(&SignedContextIdentity {
+                    permission: Some(" padded".to_owned()),
+                    ..staff.clone()
+                })
+                .is_err()
+        );
+        assert!(
+            signer
+                .sign(&SignedContextIdentity {
+                    org_id: Some(String::new()),
+                    ..staff
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn tokens_without_grant_fields_still_verify() {
+        let (signer, verifier) = signed_context_services();
+        let token = changed_signed_context(&signer, |claims| {
+            let object = claims.as_object_mut().unwrap();
+            object.remove("org_id");
+            object.remove("permission");
+            object.remove("perm_version");
+        });
+        let claims = verifier.verify(&token).unwrap();
+        assert_eq!(claims.org_id, None);
+        assert_eq!(claims.permission, None);
+        assert_eq!(claims.perm_version, None);
+        let token = changed_signed_context(&signer, |claims| {
+            claims["permission"] = serde_json::json!("im:tenants");
+        });
+        assert!(
+            verifier.verify(&token).is_err(),
+            "a user token cannot smuggle a staff grant"
         );
     }
 
