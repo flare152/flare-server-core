@@ -18,6 +18,9 @@ default = ["kv", "auth", "telemetry"]
 # KV 存储
 kv = []
 
+# Opt-in PostgreSQL acquisition observation; reuse the workspace SQLx runtime.
+postgres = ["dep:sqlx"]
+
 # 认证
 auth = []
 
@@ -63,6 +66,7 @@ uuid = { workspace = true }
 # ===== KV 存储 =====
 etcd-client = { workspace = true }
 redis = { workspace = true }
+sqlx = { workspace = true, optional = true }
 
 # ===== 认证 =====
 jsonwebtoken = { workspace = true }

@@ -131,6 +131,7 @@ kafka = ["flare-core-messaging/kafka"]
 
 # 基础设施功能
 kv = ["flare-core-infra/kv"]
+postgres = ["flare-core-infra/postgres"]
 auth = ["flare-core-infra/auth"]
 telemetry = ["flare-core-infra/telemetry"]
 
@@ -138,7 +139,7 @@ telemetry = ["flare-core-infra/telemetry"]
 proto = ["flare-core-base/proto", "flare-core-transport/proto", "flare-core-messaging/proto"]
 
 # 完整功能
-full = ["http", "grpc", "discovery", "nats", "kafka", "kv", "auth", "telemetry", "proto"]
+full = ["http", "grpc", "discovery", "nats", "kafka", "kv", "postgres", "auth", "telemetry", "proto"]
 
 [dependencies]
 # 内部 crate

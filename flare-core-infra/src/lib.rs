@@ -7,6 +7,8 @@
 pub mod auth;
 pub mod kv;
 pub mod metrics;
+#[cfg(feature = "postgres")]
+pub mod storage;
 pub mod telemetry;
 
 // KV re-exports.

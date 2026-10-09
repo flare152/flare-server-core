@@ -128,6 +128,8 @@ pub use flare_core_messaging::eventbus::{
 // Infrastructure modules.
 pub use flare_core_infra::auth;
 pub use flare_core_infra::kv;
+#[cfg(feature = "postgres")]
+pub use flare_core_infra::storage;
 pub use flare_core_infra::telemetry;
 
 // Authentication types.
