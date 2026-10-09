@@ -16,7 +16,7 @@
 //! after a restart, Management still refusing for 10 s windows each preceded
 //! by a 2 s connect timeout).
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 /// Retry hint while another request is already probing the upstream.
@@ -35,6 +35,40 @@ pub enum Outcome {
     /// Says nothing about upstream health: the caller's own body failed, or
     /// the caller went away before the upstream answered.
     Neutral,
+}
+
+/// Fixed, business-neutral states suitable for bounded-cardinality metric labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+impl CircuitState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::Open => "open",
+            Self::HalfOpen => "half_open",
+        }
+    }
+}
+
+/// One read-only observation; counters describe the current circuit cycle,
+/// not lifetime totals. This deliberately does not expose the partition label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CircuitSnapshot {
+    pub state: CircuitState,
+    /// Whether the single half-open probe is still outstanding.
+    pub probing: bool,
+    /// The current closed-state failure streak; reset when the circuit opens.
+    pub consecutive_failures: u32,
+    /// Probes that failed since the circuit opened; reset by a successful probe.
+    pub failed_probes: u32,
+    /// Time left in the open window, zero while closed or half-open. This is
+    /// not the retry hint for callers blocked by an outstanding probe.
+    pub remaining_open: Duration,
 }
 
 pub struct CircuitBreaker {
@@ -87,6 +121,34 @@ impl CircuitBreaker {
         } else {
             self.open_for
         }
+    }
+
+    /// Observe without waiting for the state lock or admitting a request.
+    /// Contention returns `None`; a scrape never reserves/releases a probe,
+    /// resets counters, changes the window, or emits a state-transition log.
+    pub fn try_snapshot(&self) -> Option<CircuitSnapshot> {
+        self.try_snapshot_at(Instant::now())
+    }
+
+    fn try_snapshot_at(&self, now: Instant) -> Option<CircuitSnapshot> {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => return None,
+            // Match the mutation path's poison recovery without clearing it.
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        let (phase, remaining_open) = match state.open_until {
+            None => (CircuitState::Closed, Duration::ZERO),
+            Some(until) if now < until => (CircuitState::Open, until - now),
+            Some(_) => (CircuitState::HalfOpen, Duration::ZERO),
+        };
+        Some(CircuitSnapshot {
+            state: phase,
+            probing: state.probing,
+            consecutive_failures: state.consecutive_failures,
+            failed_probes: state.failed_probes,
+            remaining_open,
+        })
     }
 
     /// `Err` carries how long the caller should wait before retrying.
@@ -201,6 +263,243 @@ mod tests {
     use super::*;
 
     const WINDOW: Duration = Duration::from_secs(10);
+
+    fn state_fields(state: &State) -> (u32, Option<Instant>, bool, u32) {
+        (
+            state.consecutive_failures,
+            state.open_until,
+            state.probing,
+            state.failed_probes,
+        )
+    }
+
+    #[test]
+    fn snapshot_state_labels_are_fixed() {
+        assert_eq!(CircuitState::Closed.as_str(), "closed");
+        assert_eq!(CircuitState::Open.as_str(), "open");
+        assert_eq!(CircuitState::HalfOpen.as_str(), "half_open");
+    }
+
+    #[test]
+    fn snapshot_closed_preserves_the_failure_streak_and_admitted_tickets() {
+        let breaker = CircuitBreaker::new("test", 3, WINDOW, WINDOW);
+        let now = Instant::now();
+        let ticket = breaker.try_admit_at(now).unwrap();
+        fail(&breaker, now);
+        let before = state_fields(&breaker.lock());
+        for _ in 0..64 {
+            assert_eq!(
+                breaker.try_snapshot_at(now),
+                Some(CircuitSnapshot {
+                    state: CircuitState::Closed,
+                    probing: false,
+                    consecutive_failures: 1,
+                    failed_probes: 0,
+                    remaining_open: Duration::ZERO,
+                })
+            );
+        }
+        assert_eq!(state_fields(&breaker.lock()), before);
+        ticket.settle_at(Outcome::Success, now);
+        assert_eq!(
+            breaker.try_snapshot_at(now).unwrap().consecutive_failures,
+            0
+        );
+        fail(&breaker, now);
+        fail(&breaker, now);
+        assert!(
+            breaker.try_admit_at(now).is_ok(),
+            "scrapes do not add failures"
+        );
+    }
+
+    #[test]
+    fn snapshot_open_preserves_the_window_and_straggler_rules() {
+        let breaker = CircuitBreaker::new("test", 1, WINDOW, WINDOW);
+        let now = Instant::now();
+        let straggler_ok = breaker.try_admit_at(now).unwrap();
+        let straggler_err = breaker.try_admit_at(now).unwrap();
+        fail(&breaker, now);
+        let before = state_fields(&breaker.lock());
+        let later = now + Duration::from_secs(4);
+        for _ in 0..64 {
+            assert_eq!(
+                breaker.try_snapshot_at(later),
+                Some(CircuitSnapshot {
+                    state: CircuitState::Open,
+                    probing: false,
+                    consecutive_failures: 0,
+                    failed_probes: 0,
+                    remaining_open: Duration::from_secs(6),
+                })
+            );
+        }
+        assert_eq!(state_fields(&breaker.lock()), before);
+        straggler_ok.settle_at(Outcome::Success, later);
+        straggler_err.settle_at(Outcome::Failure, later);
+        assert_eq!(state_fields(&breaker.lock()), before);
+        assert_eq!(
+            breaker.try_admit_at(later).err(),
+            Some(Duration::from_secs(6))
+        );
+    }
+
+    #[test]
+    fn snapshot_expired_window_does_not_reserve_the_half_open_probe() {
+        let breaker = CircuitBreaker::new("test", 1, WINDOW, WINDOW);
+        let now = Instant::now();
+        fail(&breaker, now);
+        let expired = now + WINDOW;
+        let before = state_fields(&breaker.lock());
+        for _ in 0..64 {
+            assert_eq!(
+                breaker.try_snapshot_at(expired),
+                Some(CircuitSnapshot {
+                    state: CircuitState::HalfOpen,
+                    probing: false,
+                    consecutive_failures: 0,
+                    failed_probes: 0,
+                    remaining_open: Duration::ZERO,
+                })
+            );
+        }
+        assert_eq!(state_fields(&breaker.lock()), before);
+        let probe = breaker
+            .try_admit_at(expired)
+            .expect("scrapes did not take the probe");
+        assert_eq!(breaker.try_admit_at(expired).err(), Some(PROBE_RETRY_AFTER));
+        probe.settle_at(Outcome::Success, expired);
+        assert_eq!(
+            breaker.try_snapshot_at(expired).unwrap().state,
+            CircuitState::Closed
+        );
+    }
+
+    #[test]
+    fn snapshot_outstanding_probe_does_not_release_or_extend_it() {
+        let breaker = CircuitBreaker::new("test", 1, WINDOW, WINDOW);
+        let now = Instant::now();
+        fail(&breaker, now);
+        let expired = now + WINDOW;
+        let probe = breaker.try_admit_at(expired).unwrap();
+        let before = state_fields(&breaker.lock());
+        // Even long after the open window elapsed, an outstanding probe remains
+        // half-open; its retry hint is not a new open window.
+        let later = expired + Duration::from_secs(3600);
+        for _ in 0..64 {
+            for at in [expired, later] {
+                assert_eq!(
+                    breaker.try_snapshot_at(at),
+                    Some(CircuitSnapshot {
+                        state: CircuitState::HalfOpen,
+                        probing: true,
+                        consecutive_failures: 0,
+                        failed_probes: 0,
+                        remaining_open: Duration::ZERO,
+                    })
+                );
+            }
+        }
+        assert_eq!(state_fields(&breaker.lock()), before);
+        assert_eq!(breaker.try_admit_at(later).err(), Some(PROBE_RETRY_AFTER));
+        drop(probe);
+        let next = breaker
+            .try_admit_at(later)
+            .expect("only dropping the probe frees its slot");
+        next.settle_at(Outcome::Success, later);
+        assert_eq!(
+            breaker.try_snapshot_at(later).unwrap().state,
+            CircuitState::Closed
+        );
+    }
+
+    #[test]
+    fn snapshot_failed_probes_preserves_short_and_full_windows() {
+        let reconnect = Duration::from_secs(2);
+        let breaker = CircuitBreaker::new("test", 1, WINDOW, reconnect);
+        let now = Instant::now();
+        fail(&breaker, now);
+        let mut at = now + WINDOW;
+        for (index, outcome, window) in [
+            (1, Outcome::Unreachable, reconnect),
+            (2, Outcome::Failure, WINDOW),
+        ] {
+            breaker.try_admit_at(at).unwrap().settle_at(outcome, at);
+            let before = state_fields(&breaker.lock());
+            for _ in 0..64 {
+                assert_eq!(
+                    breaker.try_snapshot_at(at),
+                    Some(CircuitSnapshot {
+                        state: CircuitState::Open,
+                        probing: false,
+                        consecutive_failures: 0,
+                        failed_probes: index,
+                        remaining_open: window,
+                    })
+                );
+            }
+            assert_eq!(state_fields(&breaker.lock()), before);
+            assert_eq!(breaker.try_admit_at(at).err(), Some(window));
+            at += window;
+        }
+        breaker
+            .try_admit_at(at)
+            .unwrap()
+            .settle_at(Outcome::Success, at);
+        let closed = breaker.try_snapshot_at(at).unwrap();
+        assert_eq!(closed.state, CircuitState::Closed);
+        assert_eq!(closed.failed_probes, 0);
+    }
+
+    #[test]
+    fn snapshot_lock_contention_returns_none_without_mutating_state() {
+        let breaker = CircuitBreaker::new("test", 1, WINDOW, WINDOW);
+        let now = Instant::now();
+        fail(&breaker, now);
+        let before = state_fields(&breaker.lock());
+        let held = breaker.lock();
+        for _ in 0..64 {
+            assert!(breaker.try_snapshot().is_none());
+            assert!(breaker.try_snapshot_at(now).is_none());
+        }
+        assert_eq!(state_fields(&held), before);
+        drop(held);
+        assert_eq!(
+            breaker.try_snapshot_at(now).unwrap().state,
+            CircuitState::Open
+        );
+        assert_eq!(state_fields(&breaker.lock()), before);
+    }
+
+    #[test]
+    fn snapshot_recovers_a_poisoned_lock_without_clearing_or_mutating_it() {
+        let breaker = CircuitBreaker::new("test", 3, WINDOW, WINDOW);
+        let now = Instant::now();
+        fail(&breaker, now);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = breaker.lock();
+            panic!("poison the snapshot test mutex");
+        }));
+        assert!(poisoned.is_err());
+        let before = state_fields(&breaker.lock());
+        for _ in 0..64 {
+            let snapshot = breaker
+                .try_snapshot_at(now)
+                .expect("read-only poison recovery");
+            assert_eq!(snapshot.state, CircuitState::Closed);
+            assert_eq!(snapshot.consecutive_failures, 1);
+            assert!(breaker.state.is_poisoned());
+        }
+        assert_eq!(state_fields(&breaker.lock()), before);
+        breaker
+            .try_admit_at(now)
+            .unwrap()
+            .settle_at(Outcome::Success, now);
+        assert_eq!(
+            breaker.try_snapshot_at(now).unwrap().consecutive_failures,
+            0
+        );
+    }
 
     fn fail(breaker: &CircuitBreaker, now: Instant) {
         breaker
