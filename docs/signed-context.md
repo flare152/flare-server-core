@@ -71,3 +71,46 @@ let service = SignedContextLayer::new(verifier).layer(grpc_service);
 Context 才带令牌，元数据身份或匿名上下文不转发任何东西。与 `request_with_context` 配合时，
 元数据即签名身份，接收方不会判为冲突；从已验证上下文派生出别的租户或用户再转发，接收方会拒绝。
 
+## 密钥集与 kid（v4 R3-1）
+
+签发端可以声明自己的密钥 id：`SignedContextSigner::from_private_key(..)?.with_kid("gateway")?`
+把 `kid` 写进 JWT 头。校验端持一个 `KeySet`（kid → 公钥）：
+
+- `FLARE_INTERNAL_CTX_PUBLIC_KEYS`：JSON 对象 `{"gateway": "<SPKI PEM 或 base64>", "hook": ...}`，
+  或一个目录，目录里每个组件一个 `<kid>.pem`（或 `.pub`）文件。
+- `FLARE_INTERNAL_CTX_PUBLIC_KEY`：单把 Cell 公钥，登记为 `kid=legacy`；没有 `kid` 头的令牌按
+  它校验。
+- 两个都设时组件集叠加在 legacy 之上；都不设时 `SignedContextVerifier::from_env()` 报错，
+  `from_env_optional()` 回 `None`。
+
+只有单钥部署（只设 `FLARE_INTERNAL_CTX_PUBLIC_KEY`）时，令牌里任何 kid 都回落到这把钥：
+组件密钥由 flarectl 生成之前（R6-2）kid 钉死只是名义上的；R6-4 删除这条回落。只要集合里
+出现任何一把组件钥，未登记的 kid 一律拒绝。
+
+`require_staff_kid(["gateway"])` 把 `Staff` 上下文钉到指定组件：别的组件签的 `Staff` 一律
+`UNAUTHENTICATED`，其余 actor 类型不受影响。Core 的管理面（admin-gateway 与它的四个下游）
+只收网关签的 `Staff`；被攻破的 Social 服务拿不到 gateway 钥，伪造不了员工身份。
+验签后的 `SignedContextClaims::kid` 与 actor 属性 `kid` 记录实际命中的组件。
+
+`SignedContextIdentity::with_trace_id` 把发起请求的追踪号签进令牌（最长 128 字节），校验端
+写进 `Context::trace_id`；它只用于关联日志，不是身份。
+
+### Staff 权限门禁
+
+Core 侧与 Social `flare-social-common::auth` 同一规则：
+
+```rust,ignore
+use flare_server_core::{require_staff_permission, require_staff_permission_any, staff_claims};
+use flare_core_infra::auth::core_admin::permission;
+
+let claims = require_staff_permission(&ctx, permission::USERS_KICK)?;
+// 未验签上下文 UNAUTHENTICATED；非 Staff 或 permission 不符 PERMISSION_DENIED。
+```
+
+### Core 管理路由契约
+
+`flare_core_infra::auth::core_admin` 是 Core 管理面的路由表：每条路由的方法、相对管理根的路径
+模式、权限码（`core:conversations:read`、`core:users:kick`、`core:hooks:write` 等）、是否写、
+是否仅平台员工。Social 网关 admin 分区用 `resolve(method, path)` 决定要签进 Staff 上下文的权限码，
+Core admin-gateway 用同一张表校验收到的码；两端共用一份，不会漂移。
+

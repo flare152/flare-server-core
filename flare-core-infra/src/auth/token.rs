@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Sha384, Sha512};
 use uuid::Uuid;
 
+use super::key_set::{
+    INTERNAL_CTX_PUBLIC_KEY_ENV, INTERNAL_CTX_PUBLIC_KEYS_ENV, KeySet, LEGACY_KID, valid_kid,
+};
 use super::store::TokenStore;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -172,6 +175,22 @@ fn install_hmac_jwt_provider() {
     let _ = FLARE_JWT_PROVIDER.install_default();
 }
 
+/// An Ed25519 SPKI public key (PEM, base64 PEM or base64 DER) as a JWT decoding key. The JWT
+/// crypto provider is installed on the way, so a verifier built from a [`KeySet`] alone works.
+pub(crate) fn ed25519_public_decoding_key(material: &str) -> Result<DecodingKey> {
+    install_hmac_jwt_provider();
+    let document = key_document(material)?;
+    let key = if document.starts_with(b"-----BEGIN ") {
+        VerifyingKey::from_public_key_pem(
+            std::str::from_utf8(&document).map_err(|_| anyhow!("invalid key encoding"))?,
+        )
+    } else {
+        VerifyingKey::from_public_key_der(&document)
+    }
+    .map_err(|_| anyhow!("invalid Ed25519 public key"))?;
+    Ok(DecodingKey::from_ed_der(key.as_bytes()))
+}
+
 /// Decode PEM directly or a base64-encoded PEM/DER document. Never include key material in errors.
 fn key_document(material: &str) -> Result<Vec<u8>> {
     if material.trim_start().starts_with("-----BEGIN ") {
@@ -250,6 +269,8 @@ pub struct SignedContextIdentity {
     pub permission: Option<String>,
     /// Staff only: the role bundle version the session was authorized against.
     pub perm_version: Option<u64>,
+    /// Trace id of the originating request, for log correlation only; never identity.
+    pub trace_id: Option<String>,
 }
 
 impl SignedContextIdentity {
@@ -269,7 +290,14 @@ impl SignedContextIdentity {
             org_id: None,
             permission: None,
             perm_version: None,
+            trace_id: None,
         }
+    }
+
+    /// Trace id to propagate (at most 128 bytes); it carries no identity.
+    pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self
     }
 
     /// Staff grant description. The permission is the route's code as the admin partition
@@ -324,6 +352,7 @@ impl SignedContextIdentity {
                 .credential_id
                 .as_deref()
                 .is_some_and(|id| !valid(id, 256))
+            || self.trace_id.as_deref().is_some_and(|id| !valid(id, 128))
             || self.roles.len() > 32
             || self.roles.iter().any(|role| !valid(role, 128))
             || (self.actor_type == SignedActorType::Guest && !self.roles.is_empty())
@@ -360,6 +389,13 @@ pub struct SignedContextClaims {
     pub permission: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perm_version: Option<u64>,
+    /// Trace id of the originating request (v4 R3-1); correlation only, never identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// Key id the token was verified with: the JWT `kid` header, [`LEGACY_KID`] when absent.
+    /// Filled by the verifier; never part of the signed payload.
+    #[serde(skip)]
+    pub kid: String,
 }
 
 impl SignedContextClaims {
@@ -374,6 +410,7 @@ impl SignedContextClaims {
             org_id: self.org_id.clone(),
             permission: self.permission.clone(),
             perm_version: self.perm_version,
+            trace_id: self.trace_id.clone(),
         }
         .validate()?;
         if self.sub != self.actor_id
@@ -393,16 +430,37 @@ impl SignedContextClaims {
 }
 
 /// Only a process holding the private key can issue cell-internal identity.
+///
+/// The second field is the key id written into the JWT header (v4 R3-1): the component the
+/// private key belongs to, so receivers can resolve the matching public key and pin actor types
+/// to components. Without one the token verifies as [`LEGACY_KID`].
 #[derive(Clone)]
-pub struct SignedContextSigner(Arc<TokenService>);
+pub struct SignedContextSigner(Arc<TokenService>, Option<String>);
 
 impl SignedContextSigner {
     pub fn from_private_key(material: &str) -> Result<Self> {
-        Ok(Self(Arc::new(TokenService::from_ed25519_private_key(
-            material,
-            INTERNAL_CONTEXT_ISSUER,
-            INTERNAL_CONTEXT_TTL_SECS,
-        )?)))
+        Ok(Self(
+            Arc::new(TokenService::from_ed25519_private_key(
+                material,
+                INTERNAL_CONTEXT_ISSUER,
+                INTERNAL_CONTEXT_TTL_SECS,
+            )?),
+            None,
+        ))
+    }
+
+    /// Declares the key id this signer's key is registered under at the receivers.
+    pub fn with_kid(mut self, kid: impl Into<String>) -> Result<Self> {
+        let kid = kid.into();
+        if !valid_kid(&kid) {
+            return Err(anyhow!("invalid signed context key id"));
+        }
+        self.1 = Some(kid);
+        Ok(self)
+    }
+
+    pub fn kid(&self) -> Option<&str> {
+        self.1.as_deref()
     }
 
     pub fn sign(&self, identity: &SignedContextIdentity) -> Result<String> {
@@ -430,24 +488,79 @@ impl SignedContextSigner {
             org_id: identity.org_id.clone(),
             permission: identity.permission.clone(),
             perm_version: identity.perm_version,
+            trace_id: identity.trace_id.clone(),
+            kid: String::new(),
         };
-        Ok(encode(&Header::new(Algorithm::EdDSA), &claims, key)?)
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = self.1.clone();
+        Ok(encode(&header, &claims, key)?)
     }
 }
 
-/// Public-key-only verifier. Construction never grants signing capability.
+/// Public-key-only verifier over a [`KeySet`]. Construction never grants signing capability.
+///
+/// The JWT `kid` header selects the public key (no kid is [`LEGACY_KID`]); `Staff` tokens may
+/// additionally be pinned to the key ids of the components allowed to sign them.
 #[derive(Clone)]
-pub struct SignedContextVerifier(Arc<TokenService>);
+pub struct SignedContextVerifier {
+    keys: Arc<KeySet>,
+    staff_kids: Option<Arc<[String]>>,
+}
 
 impl SignedContextVerifier {
+    /// The single-key deployment: one Cell public key, registered as [`LEGACY_KID`].
     pub fn from_public_key(material: &str) -> Result<Self> {
-        Ok(Self(Arc::new(TokenService::from_ed25519_public_key(
-            material,
-            INTERNAL_CONTEXT_ISSUER,
-        )?)))
+        Ok(Self::from_key_set(KeySet::single(material)?))
+    }
+
+    pub fn from_key_set(keys: KeySet) -> Self {
+        Self {
+            keys: Arc::new(keys),
+            staff_kids: None,
+        }
+    }
+
+    /// [`KeySet::from_env`]; an error when neither variable is set.
+    pub fn from_env() -> Result<Self> {
+        Self::from_env_optional()?.ok_or_else(|| {
+            anyhow!("{INTERNAL_CTX_PUBLIC_KEYS_ENV} or {INTERNAL_CTX_PUBLIC_KEY_ENV} is required")
+        })
+    }
+
+    /// [`KeySet::from_env`]; `None` when neither variable is set.
+    pub fn from_env_optional() -> Result<Option<Self>> {
+        Ok(KeySet::from_env()?.map(Self::from_key_set))
+    }
+
+    /// Accept `Staff` only from these key ids; other actor types are not affected.
+    pub fn require_staff_kid<I, K>(mut self, kids: I) -> Self
+    where
+        I: IntoIterator<Item = K>,
+        K: Into<String>,
+    {
+        self.staff_kids = Some(kids.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn key_set(&self) -> &KeySet {
+        &self.keys
     }
 
     pub fn verify(&self, token: &str) -> Result<SignedContextClaims> {
+        let header = jsonwebtoken::decode_header(token)?;
+        if header.alg != Algorithm::EdDSA {
+            return Err(anyhow!("invalid signed context algorithm"));
+        }
+        let kid = header.kid.as_deref();
+        if let Some(kid) = kid
+            && !valid_kid(kid)
+        {
+            return Err(anyhow!("invalid signed context key id"));
+        }
+        let key = self
+            .keys
+            .resolve(kid)
+            .ok_or_else(|| anyhow!("unknown signed context key id"))?;
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[INTERNAL_CONTEXT_ISSUER]);
         validation.set_audience(&[INTERNAL_CONTEXT_AUDIENCE]);
@@ -466,10 +579,18 @@ impl SignedContextVerifier {
             "request_id",
         ]);
         validation.leeway = 0;
-        let claims =
-            decode::<SignedContextClaims>(token, &self.0.decoding_key, &validation)?.claims;
+        let mut claims = decode::<SignedContextClaims>(token, key, &validation)?.claims;
+        claims.kid = kid.unwrap_or(LEGACY_KID).to_owned();
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         claims.validate(now)?;
+        if claims.actor_type == SignedActorType::Staff
+            && let Some(allowed) = &self.staff_kids
+            && !allowed.iter().any(|accepted| accepted == &claims.kid)
+        {
+            return Err(anyhow!(
+                "staff context signed by a key id this service does not accept"
+            ));
+        }
         Ok(claims)
     }
 }
@@ -545,23 +666,13 @@ impl TokenService {
 
     /// Data-plane verifier. A public key must never grant signing capability.
     pub fn from_ed25519_public_key(material: &str, issuer: impl Into<String>) -> Result<Self> {
-        install_hmac_jwt_provider();
-        let document = key_document(material)?;
-        let key = if document.starts_with(b"-----BEGIN ") {
-            VerifyingKey::from_public_key_pem(
-                std::str::from_utf8(&document).map_err(|_| anyhow!("invalid key encoding"))?,
-            )
-        } else {
-            VerifyingKey::from_public_key_der(&document)
-        }
-        .map_err(|_| anyhow!("invalid Ed25519 public key"))?;
         Ok(Self {
             secret: String::new(),
             issuer: issuer.into(),
             ttl: Duration::from_secs(60),
             refresh_ttl: Duration::from_secs(DEFAULT_REFRESH_TTL_SECS),
             encoding_key: None,
-            decoding_key: DecodingKey::from_ed_der(key.as_bytes()),
+            decoding_key: ed25519_public_decoding_key(material)?,
             algorithm: Algorithm::EdDSA,
             store: None,
         })
@@ -1129,7 +1240,166 @@ mod tests {
             .generate_with_ed25519("staff", Some("tenant-1"), "control", "flare-internal")
             .unwrap();
         assert!(verifier.verify(&control).is_err());
-        assert!(verifier.0.encoding_key.is_none());
+        assert!(verifier.key_set().is_single_key());
+    }
+
+    fn pem_pair(seed: u8) -> (String, String) {
+        let key = SigningKey::from_bytes(&[seed; 32]);
+        (
+            key.to_pkcs8_pem(Default::default()).unwrap().to_string(),
+            key.verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
+        )
+    }
+
+    fn staff(permission: &str) -> SignedContextIdentity {
+        SignedContextIdentity::new(SignedActorType::Staff, "staff-1", "app-1", "request-1")
+            .with_staff_grant(None, Some(permission.to_owned()), 3)
+    }
+
+    #[test]
+    fn kid_header_selects_the_component_key_and_no_kid_is_legacy() {
+        let (gateway_private, gateway_public) = pem_pair(61);
+        let (legacy_private, legacy_public) = pem_pair(62);
+        let mut keys = KeySet::single(&legacy_public).unwrap();
+        keys.insert("gateway", &gateway_public).unwrap();
+        let verifier = SignedContextVerifier::from_key_set(keys);
+        let gateway = SignedContextSigner::from_private_key(&gateway_private)
+            .unwrap()
+            .with_kid("gateway")
+            .unwrap();
+        assert_eq!(gateway.kid(), Some("gateway"));
+        let legacy = SignedContextSigner::from_private_key(&legacy_private).unwrap();
+        assert_eq!(legacy.kid(), None);
+        let identity = SignedContextIdentity::new(SignedActorType::User, "u", "t", "r");
+
+        let token = gateway.sign(&identity).unwrap();
+        assert_eq!(
+            jsonwebtoken::decode_header(&token).unwrap().kid.as_deref(),
+            Some("gateway")
+        );
+        assert_eq!(verifier.verify(&token).unwrap().kid, "gateway");
+        let token = legacy.sign(&identity).unwrap();
+        assert_eq!(jsonwebtoken::decode_header(&token).unwrap().kid, None);
+        assert_eq!(verifier.verify(&token).unwrap().kid, LEGACY_KID);
+
+        // The gateway key without a kid is checked against the legacy key and fails; the
+        // legacy key claiming to be the gateway fails; an unregistered kid is unknown.
+        let unlabeled_gateway = SignedContextSigner::from_private_key(&gateway_private).unwrap();
+        assert!(
+            verifier
+                .verify(&unlabeled_gateway.sign(&identity).unwrap())
+                .is_err()
+        );
+        let impostor = SignedContextSigner::from_private_key(&legacy_private)
+            .unwrap()
+            .with_kid("gateway")
+            .unwrap();
+        assert!(verifier.verify(&impostor.sign(&identity).unwrap()).is_err());
+        let hook = SignedContextSigner::from_private_key(&gateway_private)
+            .unwrap()
+            .with_kid("hook")
+            .unwrap();
+        assert!(verifier.verify(&hook.sign(&identity).unwrap()).is_err());
+        assert!(
+            SignedContextSigner::from_private_key(&gateway_private)
+                .unwrap()
+                .with_kid("bad kid")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn single_key_deployment_verifies_any_kid_until_component_keys_exist() {
+        let (private, public) = pem_pair(63);
+        let verifier = SignedContextVerifier::from_public_key(&public).unwrap();
+        let signer = SignedContextSigner::from_private_key(&private)
+            .unwrap()
+            .with_kid("gateway")
+            .unwrap();
+        let identity = SignedContextIdentity::new(SignedActorType::Service, "svc", "t", "r");
+        let claims = verifier.verify(&signer.sign(&identity).unwrap()).unwrap();
+        assert_eq!(claims.kid, "gateway", "the declared kid is kept");
+        let mut keys = KeySet::single(&public).unwrap();
+        keys.insert("hook", &pem_pair(64).1).unwrap();
+        let pinned = SignedContextVerifier::from_key_set(keys);
+        assert!(
+            pinned.verify(&signer.sign(&identity).unwrap()).is_err(),
+            "a component set no longer falls back to the legacy key"
+        );
+    }
+
+    #[test]
+    fn staff_kid_pinning_rejects_staff_from_other_components_only() {
+        let (gateway_private, gateway_public) = pem_pair(65);
+        let (hook_private, hook_public) = pem_pair(66);
+        let mut keys = KeySet::empty();
+        keys.insert("gateway", &gateway_public).unwrap();
+        keys.insert("hook", &hook_public).unwrap();
+        let verifier = SignedContextVerifier::from_key_set(keys).require_staff_kid(["gateway"]);
+        let gateway = SignedContextSigner::from_private_key(&gateway_private)
+            .unwrap()
+            .with_kid("gateway")
+            .unwrap();
+        let hook = SignedContextSigner::from_private_key(&hook_private)
+            .unwrap()
+            .with_kid("hook")
+            .unwrap();
+        let claims = verifier
+            .verify(&gateway.sign(&staff("core:users:kick")).unwrap())
+            .unwrap();
+        assert_eq!(claims.permission.as_deref(), Some("core:users:kick"));
+        assert_eq!(claims.kid, "gateway");
+        assert!(
+            verifier
+                .verify(&hook.sign(&staff("core:users:kick")).unwrap())
+                .is_err(),
+            "a hook key cannot sign staff"
+        );
+        let service = SignedContextIdentity::new(SignedActorType::Service, "hook-1", "t", "r");
+        assert_eq!(
+            verifier.verify(&hook.sign(&service).unwrap()).unwrap().kid,
+            "hook"
+        );
+        let unpinned = SignedContextVerifier::from_key_set(verifier.key_set().clone());
+        assert!(
+            unpinned
+                .verify(&hook.sign(&staff("core:users:kick")).unwrap())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn trace_id_roundtrips_and_is_bounded() {
+        let (signer, verifier) = signed_context_services();
+        let identity = SignedContextIdentity::new(SignedActorType::User, "u", "t", "r")
+            .with_trace_id("trace-1");
+        let claims = verifier.verify(&signer.sign(&identity).unwrap()).unwrap();
+        assert_eq!(claims.trace_id.as_deref(), Some("trace-1"));
+        let without = verifier
+            .verify(
+                &signer
+                    .sign(&SignedContextIdentity::new(
+                        SignedActorType::User,
+                        "u",
+                        "t",
+                        "r",
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(without.trace_id, None);
+        assert!(
+            signer
+                .sign(&identity.clone().with_trace_id("x".repeat(129)))
+                .is_err()
+        );
+        assert!(signer.sign(&identity.with_trace_id(" padded")).is_err());
+        let token = changed_signed_context(&signer, |claims| {
+            claims["trace_id"] = serde_json::json!("y".repeat(129));
+        });
+        assert!(verifier.verify(&token).is_err());
     }
 
     #[test]

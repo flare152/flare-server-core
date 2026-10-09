@@ -93,7 +93,8 @@ pub use flare_core_transport::grpc::middleware::{
     ContextLayer, ContextService, SignedContextLayer, SignedContextService,
     SignedFirstContextLayer, SignedFirstContextService, VerifiedContext, extract_actor_id,
     extract_context, extract_request_id, extract_tenant_id, extract_user_id, get_context,
-    require_actor_id, require_request_id, require_tenant_id, require_user_id,
+    require_actor_id, require_request_id, require_staff_permission, require_staff_permission_any,
+    require_tenant_id, require_user_id, staff_claims,
 };
 
 // Transport modules.
@@ -134,7 +135,7 @@ pub use flare_core_infra::telemetry;
 
 // Authentication types.
 pub use flare_core_infra::auth::{
-    AuthError, AuthenticatedPrincipal, CompositeTokenValidator, SignedActorType,
+    AuthError, AuthenticatedPrincipal, CompositeTokenValidator, KeySet, SignedActorType,
     SignedContextClaims, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
     TokenClaims, TokenService, TokenValidationRequest, TokenValidator, TrustedIssuer,
 };

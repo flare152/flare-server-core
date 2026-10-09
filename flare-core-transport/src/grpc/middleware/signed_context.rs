@@ -229,22 +229,77 @@ fn signed_context(claims: &SignedContextClaims, token: &str) -> Ctx {
     if let Some(perm_version) = claims.perm_version {
         actor = actor.with_attribute("perm_version", perm_version.to_string());
     }
+    // The key id the token verified with, so handlers can log which component signed it.
+    actor = actor.with_attribute("kid", &claims.kid);
     let mut ctx = Context::with_request_id(&claims.request_id)
         .with_tenant_id(&claims.tenant_id)
         .with_actor(actor);
+    if let Some(trace_id) = &claims.trace_id {
+        ctx = ctx.with_trace_id(trace_id);
+    }
     // A TenantAdmin issuer signs the authenticated administrator's own id as
     // actor_id, and that id is also the acting user (issuers build the context
-    // with user_id == actor_id and handlers record it as the operator). Only the
-    // signed actor_id is used, so no caller can name another user; elevated
-    // rights still come only from the signed roles. Service, System and Guest
-    // actors are not users and never get a user_id.
+    // with user_id == actor_id and handlers record it as the operator). A Staff
+    // actor signed by the admin partition is the operator the same way: handlers
+    // record the employee id, and its rights come from the signed permission
+    // grant, never from the user id. Only the signed actor_id is used, so no
+    // caller can name another user; elevated rights still come only from the
+    // signed roles or grant. Service, System and Guest actors are not users and
+    // never get a user_id.
     if matches!(
         claims.actor_type,
-        SignedActorType::User | SignedActorType::TenantAdmin
+        SignedActorType::User | SignedActorType::TenantAdmin | SignedActorType::Staff
     ) {
         ctx = ctx.with_user_id(&claims.actor_id);
     }
     Arc::new(ctx.insert_data(VerifiedContext::signed(claims.clone(), token.to_owned())))
+}
+
+/// The verified `Staff` claims of a context: `None` for every other actor, for a context that
+/// was not verified by this layer, and for an anonymous admission.
+pub fn staff_claims(ctx: &Context) -> Option<&SignedContextClaims> {
+    ctx.get_data::<VerifiedContext>()
+        .and_then(VerifiedContext::claims)
+        .filter(|claims| claims.actor_type == SignedActorType::Staff)
+}
+
+/// The RPC gate of a Staff-only operation: the verified claims must name a `Staff` actor whose
+/// signed `permission` is exactly `permission`. An unverified context is `UNAUTHENTICATED`; a
+/// verified non-staff actor or another permission is `PERMISSION_DENIED`. The same rule the
+/// Social services apply (`flare-social-common::auth::require_staff_permission`).
+pub fn require_staff_permission<'a>(
+    ctx: &'a Context,
+    permission: &str,
+) -> Result<&'a SignedContextClaims, Status> {
+    let claims = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(VerifiedContext::claims)
+        .ok_or_else(|| Status::unauthenticated("signed internal context required"))?;
+    if claims.actor_type != SignedActorType::Staff {
+        return Err(Status::permission_denied("staff context required"));
+    }
+    if claims.permission.as_deref() != Some(permission) {
+        return Err(Status::permission_denied(format!(
+            "staff permission {permission} required"
+        )));
+    }
+    Ok(claims)
+}
+
+/// [`require_staff_permission`] admitting any of `codes`: a read several admin surfaces compose.
+pub fn require_staff_permission_any<'a>(
+    ctx: &'a Context,
+    codes: &[&str],
+) -> Result<&'a SignedContextClaims, Status> {
+    let mut last = Err(Status::permission_denied("staff permission required"));
+    for code in codes {
+        match require_staff_permission(ctx, code) {
+            Ok(claims) => return Ok(claims),
+            Err(status) if status.code() == tonic::Code::Unauthenticated => return Err(status),
+            Err(status) => last = Err(status),
+        }
+    }
+    last
 }
 
 fn anonymous_context() -> Ctx {
@@ -377,6 +432,7 @@ mod tests {
                 &[][..],
                 Some("employee-2"),
             ),
+            (SignedActorType::Staff, "staff-1", &[][..], Some("staff-1")),
             (SignedActorType::Service, "flare-user", &[][..], None),
             (SignedActorType::System, "scheduler", &["control"][..], None),
             (SignedActorType::Guest, "anonymous", &[][..], None),
@@ -563,6 +619,155 @@ mod tests {
                 .unwrap_err()
                 .code(),
             tonic::Code::Unauthenticated
+        );
+    }
+
+    #[tokio::test]
+    async fn staff_helpers_gate_on_the_signed_permission_and_keep_kid_and_trace() {
+        let key = SigningKey::from_bytes(&[54; 32]);
+        let private = key.to_pkcs8_pem(Default::default()).unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let signer = SignedContextSigner::from_private_key(&private)
+            .unwrap()
+            .with_kid("gateway")
+            .unwrap();
+        let verifier = SignedContextVerifier::from_public_key(&public)
+            .unwrap()
+            .require_staff_kid(["gateway"]);
+        let staff = signer
+            .sign(
+                &SignedContextIdentity::new(SignedActorType::Staff, "staff-9", "app-1", "req-1")
+                    .with_staff_grant(None, Some("core:users:kick".to_owned()), 7)
+                    .with_trace_id("trace-77"),
+            )
+            .unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let mut service = SignedContextLayer::new(verifier.clone())
+            .allow_anonymous()
+            .layer(ObservingService(seen.clone()));
+        let req = HttpRequest::builder()
+            .header(SIGNED_CONTEXT_HEADER, &staff)
+            .body(Body::empty())
+            .unwrap();
+        service.call(req).await.unwrap();
+        let (ctx, _) = seen.lock().unwrap().take().unwrap();
+        assert_eq!(ctx.trace_id(), "trace-77");
+        assert_eq!(
+            ctx.actor()
+                .unwrap()
+                .attributes()
+                .get("kid")
+                .map(|v| v.as_ref()),
+            Some("gateway")
+        );
+        assert_eq!(staff_claims(&ctx).unwrap().actor_id, "staff-9");
+        assert_eq!(
+            require_staff_permission(&ctx, "core:users:kick")
+                .unwrap()
+                .tenant_id,
+            "app-1"
+        );
+        assert_eq!(
+            require_staff_permission(&ctx, "core:users:read")
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert!(
+            require_staff_permission_any(&ctx, &["core:users:read", "core:users:kick"]).is_ok()
+        );
+        assert_eq!(
+            require_staff_permission_any(&ctx, &["core:users:read", "core:tenant:read"])
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        // A user is not staff; an anonymous admission has no claims at all.
+        let user = signer
+            .sign(&SignedContextIdentity::new(
+                SignedActorType::User,
+                "alice",
+                "app-1",
+                "req-2",
+            ))
+            .unwrap();
+        let req = HttpRequest::builder()
+            .header(SIGNED_CONTEXT_HEADER, &user)
+            .body(Body::empty())
+            .unwrap();
+        service.call(req).await.unwrap();
+        let (ctx, _) = seen.lock().unwrap().take().unwrap();
+        assert!(staff_claims(&ctx).is_none());
+        assert_eq!(
+            require_staff_permission(&ctx, "core:users:kick")
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(ctx.trace_id(), "");
+        service
+            .call(HttpRequest::builder().body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (ctx, _) = seen.lock().unwrap().take().unwrap();
+        assert!(staff_claims(&ctx).is_none());
+        assert_eq!(
+            require_staff_permission(&ctx, "core:users:kick")
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            require_staff_permission_any(&ctx, &["core:users:kick"])
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        // Staff signed by another component is refused by the pinned layer outright.
+        let hook_key = SigningKey::from_bytes(&[55; 32]);
+        let hook_public = hook_key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let hook = SignedContextSigner::from_private_key(
+            &hook_key.to_pkcs8_pem(Default::default()).unwrap(),
+        )
+        .unwrap()
+        .with_kid("hook")
+        .unwrap();
+        // A component set: the gateway key under its own kid, the hook key under `hook`.
+        let mut keys = flare_core_infra::auth::KeySet::empty();
+        keys.insert("gateway", &public).unwrap();
+        keys.insert("hook", &hook_public).unwrap();
+        let pinned = SignedContextVerifier::from_key_set(keys).require_staff_kid(["gateway"]);
+        let forged = hook
+            .sign(
+                &SignedContextIdentity::new(SignedActorType::Staff, "staff-9", "app-1", "req-3")
+                    .with_staff_grant(None, Some("core:users:kick".to_owned()), 7),
+            )
+            .unwrap();
+        let mut req = Request::new(());
+        req.metadata_mut()
+            .insert(SIGNED_CONTEXT_HEADER, forged.parse().unwrap());
+        assert_eq!(
+            verify_signed_context_metadata(req.metadata(), &pinned)
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        let mut req = Request::new(());
+        req.metadata_mut()
+            .insert(SIGNED_CONTEXT_HEADER, staff.parse().unwrap());
+        assert_eq!(
+            verify_signed_context_metadata(req.metadata(), &pinned)
+                .unwrap()
+                .user_id(),
+            Some("staff-9")
         );
     }
 }

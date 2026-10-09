@@ -1,10 +1,12 @@
 pub mod api_key;
 pub mod api_key_policy;
 pub mod composite;
+pub mod core_admin;
 pub mod credential_budget;
 pub mod credential_snapshot;
 pub mod credential_verifier;
 pub mod issuer;
+pub mod key_set;
 pub mod principal;
 pub mod provider;
 pub mod store;
@@ -15,6 +17,9 @@ pub use composite::{CompositeTokenValidator, TrustedIssuer};
 pub use issuer::{
     CoreJwtTokenIssuer, HttpHookTokenIssuer, IssuedToken, TokenIssueRequest, TokenIssuer,
     build_token_issuer,
+};
+pub use key_set::{
+    INTERNAL_CTX_PUBLIC_KEY_ENV, INTERNAL_CTX_PUBLIC_KEYS_ENV, KeySet, LEGACY_KID, kid, valid_kid,
 };
 pub use principal::{
     AuthError, AuthenticatedPrincipal, TOKEN_EXPIRED_REASON, TokenValidationRequest, TokenValidator,

@@ -29,6 +29,7 @@ pub use rate_limit::RateLimitLayer;
 pub use retry::RetryLayer;
 pub use signed_context::{
     SIGNED_CONTEXT_HEADER, SignedContextLayer, SignedContextService, VerifiedContext,
+    require_staff_permission, require_staff_permission_any, staff_claims,
 };
 pub use signed_first_context::{SignedFirstContextLayer, SignedFirstContextService};
 pub use timeout::TimeoutLayer;
