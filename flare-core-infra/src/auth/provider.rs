@@ -185,6 +185,10 @@ impl HttpHookTokenValidator {
         let secret_header = HeaderName::from_bytes(config.hook_secret_header.as_bytes())
             .context("auth hook secret header is not a valid HTTP header name")?;
         let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .connect_timeout(Duration::from_millis(config.hook_timeout_ms))
             .timeout(Duration::from_millis(config.hook_timeout_ms))
             .build()
             .context("failed to build auth hook HTTP client")?;
@@ -219,10 +223,10 @@ impl TokenValidator for HttpHookTokenValidator {
             http_request = http_request.header(self.secret_header.clone(), secret);
         }
 
-        let response = http_request
+        let mut response = http_request
             .send()
             .await
-            .map_err(|err| AuthError::ProviderUnavailable(err.to_string()))?;
+            .map_err(|_| AuthError::ProviderUnavailable("auth hook request failed".into()))?;
         let status = response.status();
 
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -236,10 +240,21 @@ impl TokenValidator for HttpHookTokenValidator {
             )));
         }
 
-        response
-            .json::<HookValidationResponse>()
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|err| AuthError::ProviderUnavailable(err.to_string()))?
+            .map_err(|_| AuthError::ProviderUnavailable("auth hook response failed".into()))?
+        {
+            if body.len() + chunk.len() > 8192 {
+                return Err(AuthError::ProviderUnavailable(
+                    "auth hook response too large".into(),
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice::<HookValidationResponse>(&body)
+            .map_err(|_| AuthError::ProviderUnavailable("invalid auth hook response".into()))?
             .into_principal()
     }
 }
@@ -258,6 +273,7 @@ struct HookValidationRequest {
 #[serde(rename_all = "camelCase")]
 struct HookValidationResponse {
     active: bool,
+    reason: Option<String>,
     user_id: Option<String>,
     tenant_id: Option<String>,
     device_id: Option<String>,
@@ -272,6 +288,9 @@ struct HookValidationResponse {
 impl HookValidationResponse {
     fn into_principal(self) -> std::result::Result<AuthenticatedPrincipal, AuthError> {
         if !self.active {
+            if self.reason.as_deref() == Some(super::TOKEN_EXPIRED_REASON) {
+                return Err(AuthError::expired_token("auth hook verified expiration"));
+            }
             return Err(AuthError::InvalidToken(
                 "auth hook returned inactive token".to_string(),
             ));
@@ -410,11 +429,74 @@ pub fn build_http_hook_token_validator(
 mod tests {
     use super::super::{TOKEN_EXPIRED_REASON, TokenClaims};
     use super::*;
+    #[test]
+    fn hook_expiration_is_a_closed_reason_not_an_arbitrary_retry_hint() {
+        let expired: HookValidationResponse =
+            serde_json::from_value(serde_json::json!({"active":false,"reason":"TOKEN_EXPIRED"}))
+                .unwrap();
+        assert!(expired.into_principal().unwrap_err().is_expired_token());
+        let rejected: HookValidationResponse = serde_json::from_value(
+            serde_json::json!({"active":false,"reason":"please retry TOKEN_EXPIRED"}),
+        )
+        .unwrap();
+        assert!(!rejected.into_principal().unwrap_err().is_expired_token());
+    }
+
+    #[tokio::test]
+    async fn http_hook_never_follows_redirect_or_consumes_unbounded_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = target.local_addr().unwrap();
+        for oversized in [false, true] {
+            let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/auth", source.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = source.accept().await.unwrap();
+                let mut input = [0; 8192];
+                let _ = socket.read(&mut input).await.unwrap();
+                let response = if oversized {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: 8193\r\nConnection: close\r\n\r\n{}",
+                        "x".repeat(8193)
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{destination}/must-not-receive-secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+            let validator = HttpHookTokenValidator::new(&AuthProviderConfig {
+                hook_url: Some(endpoint),
+                hook_secret: Some("fixture-only-internal-transport-credential".into()),
+                hook_timeout_ms: 1000,
+                ..Default::default()
+            })
+            .unwrap();
+            let result = validator
+                .validate(TokenValidationRequest {
+                    token: "not-a-real-token".into(),
+                    trace_id: None,
+                    request_id: None,
+                    path: None,
+                    method: None,
+                })
+                .await;
+            assert!(matches!(result, Err(AuthError::ProviderUnavailable(_))));
+            server.await.unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), target.accept())
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn hook_response_maps_active_principal() {
         let response = HookValidationResponse {
             active: true,
+            reason: None,
             user_id: Some(" user-a ".to_string()),
             tenant_id: Some("tenant-a".to_string()),
             device_id: Some("device-a".to_string()),
@@ -648,6 +730,7 @@ mod tests {
         for user_id in [None, Some("   ".to_string())] {
             let response = HookValidationResponse {
                 active: true,
+                reason: None,
                 user_id,
                 tenant_id: Some("tenant-a".to_string()),
                 device_id: None,
