@@ -35,6 +35,8 @@ pub mod kid {
     pub const INGEST: &str = "ingest";
     /// Core admin-gateway (re-signs the verified Staff for Media).
     pub const ADMIN_GATEWAY: &str = "admin-gateway";
+    /// The Core Platform API machine sender; never resolved by a legacy Cell key.
+    pub const API_GATEWAY: &str = "api-gateway";
 }
 
 /// Key ids are short ASCII names: letters, digits, `_` and `-`, at most 32 bytes.
@@ -180,16 +182,18 @@ impl KeySet {
         self.keys.contains_key(kid)
     }
 
-    /// Whether this is the single-key deployment, where every kid resolves to the legacy key.
+    /// Whether this is the old single-key deployment. New machine capabilities
+    /// still require their explicitly named public key.
     pub fn is_single_key(&self) -> bool {
         self.single
     }
 
     /// The key for a token header: no kid is the legacy key; an unknown kid resolves only in the
-    /// single-key deployment.
+    /// single-key deployment, except the independent Platform machine identity.
     pub(crate) fn resolve(&self, kid: Option<&str>) -> Option<&DecodingKey> {
         match kid {
             None => self.keys.get(LEGACY_KID),
+            Some(kid::API_GATEWAY) => self.keys.get(kid::API_GATEWAY),
             Some(kid) => self
                 .keys
                 .get(kid)
@@ -237,6 +241,10 @@ mod tests {
         assert_eq!(set.kids(), vec![LEGACY_KID]);
         assert!(set.resolve(None).is_some());
         assert!(set.resolve(Some("gateway")).is_some());
+        assert!(
+            set.resolve(Some(kid::API_GATEWAY)).is_none(),
+            "machine writes cannot borrow the legacy key"
+        );
         set.insert("hook", &public_pem(2)).unwrap();
         assert!(!set.is_single_key());
         assert!(set.resolve(Some("hook")).is_some());
@@ -244,6 +252,16 @@ mod tests {
         assert!(set.resolve(None).is_some(), "legacy stays");
         assert!(set.insert("bad kid", &public_pem(3)).is_err());
         assert!(set.insert("ok", "not a key").is_err());
+    }
+
+    #[test]
+    fn platform_machine_identity_requires_exact_component_public_key() {
+        let mut set = KeySet::empty();
+        set.insert(kid::GATEWAY, &public_pem(1)).unwrap();
+        assert!(set.resolve(Some(kid::API_GATEWAY)).is_none());
+        set.insert(kid::API_GATEWAY, &public_pem(2)).unwrap();
+        assert!(set.resolve(Some(kid::API_GATEWAY)).is_some());
+        assert!(!set.is_single_key());
     }
 
     #[test]
