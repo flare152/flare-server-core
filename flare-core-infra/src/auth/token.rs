@@ -179,6 +179,12 @@ fn install_hmac_jwt_provider() {
 /// crypto provider is installed on the way, so a verifier built from a [`KeySet`] alone works.
 pub(crate) fn ed25519_public_decoding_key(material: &str) -> Result<DecodingKey> {
     install_hmac_jwt_provider();
+    Ok(DecodingKey::from_ed_der(
+        public_key_bytes(material)?.as_slice(),
+    ))
+}
+
+fn public_key_bytes(material: &str) -> Result<[u8; 32]> {
     let document = key_document(material)?;
     let key = if document.starts_with(b"-----BEGIN ") {
         VerifyingKey::from_public_key_pem(
@@ -188,7 +194,13 @@ pub(crate) fn ed25519_public_decoding_key(material: &str) -> Result<DecodingKey>
         VerifyingKey::from_public_key_der(&document)
     }
     .map_err(|_| anyhow!("invalid Ed25519 public key"))?;
-    Ok(DecodingKey::from_ed_der(key.as_bytes()))
+    Ok(key.to_bytes())
+}
+
+/// Fingerprint of canonical public bytes, never the PEM spelling or a private key.
+pub fn public_key_fingerprint(material: &str) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(public_key_bytes(material)?)))
 }
 
 /// Decode PEM directly or a base64-encoded PEM/DER document. Never include key material in errors.

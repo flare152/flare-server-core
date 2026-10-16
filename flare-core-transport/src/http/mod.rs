@@ -4,6 +4,7 @@ pub mod adapter;
 pub mod context;
 pub mod error;
 pub mod middleware;
+pub mod ops;
 pub mod response;
 
 pub use adapter::{HttpAdapter, HttpAdapterBuilder};

@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod kv;
 pub mod metrics;
+pub mod ops;
 #[cfg(feature = "postgres")]
 pub mod storage;
 pub mod telemetry;

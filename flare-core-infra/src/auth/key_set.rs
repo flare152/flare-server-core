@@ -52,6 +52,7 @@ pub fn valid_kid(kid: &str) -> bool {
 #[derive(Clone)]
 pub struct KeySet {
     keys: BTreeMap<String, DecodingKey>,
+    fingerprints: BTreeMap<String, String>,
     single: bool,
 }
 
@@ -73,12 +74,21 @@ impl KeySet {
             LEGACY_KID.to_owned(),
             ed25519_public_decoding_key(material)?,
         );
-        Ok(Self { keys, single: true })
+        let fingerprints = BTreeMap::from([(
+            LEGACY_KID.to_owned(),
+            super::token::public_key_fingerprint(material)?,
+        )]);
+        Ok(Self {
+            keys,
+            fingerprints,
+            single: true,
+        })
     }
 
     pub fn empty() -> Self {
         Self {
             keys: BTreeMap::new(),
+            fingerprints: BTreeMap::new(),
             single: false,
         }
     }
@@ -88,8 +98,10 @@ impl KeySet {
         if !valid_kid(kid) {
             bail!("invalid signed context key id");
         }
-        self.keys
-            .insert(kid.to_owned(), ed25519_public_decoding_key(material)?);
+        let decoding = ed25519_public_decoding_key(material)?;
+        let fingerprint = super::token::public_key_fingerprint(material)?;
+        self.keys.insert(kid.to_owned(), decoding);
+        self.fingerprints.insert(kid.to_owned(), fingerprint);
         self.single = false;
         Ok(())
     }
@@ -176,6 +188,10 @@ impl KeySet {
 
     pub fn kids(&self) -> Vec<&str> {
         self.keys.keys().map(String::as_str).collect()
+    }
+
+    pub fn fingerprints(&self) -> &BTreeMap<String, String> {
+        &self.fingerprints
     }
 
     pub fn contains(&self, kid: &str) -> bool {
