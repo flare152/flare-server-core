@@ -30,6 +30,57 @@ fn resource_exhausted(raw: &str) -> Option<String> {
 }
 
 impl NatsProducer {
+    /// Connect to operator-provisioned streams without creating or changing them.
+    /// Runtime credentials only need stream-info, publish, and reply permissions.
+    /// Reject incompatible/unbounded storage rather than silently weakening a
+    /// durable outbox's retention contract.
+    pub async fn connect_existing<C>(config: &C) -> Result<Self, ProducerError>
+    where
+        C: NatsProducerConfig + Send + Sync,
+    {
+        let client = super::connect::connect(config.nats_url())
+            .await
+            .map_err(ProducerError::Connection)?;
+        let mut context = jetstream::new(client);
+        context.set_timeout(Duration::from_millis(config.timeout_ms()));
+        let stream_specs = config.stream_specs();
+        if stream_specs.is_empty() {
+            return Err(ProducerError::Configuration("stream specs required".into()));
+        }
+        for spec in &stream_specs {
+            let stream = context
+                .get_stream(&spec.name)
+                .await
+                .map_err(|_| ProducerError::Configuration("required stream unavailable".into()))?;
+            let actual = &stream.cached_info().config;
+            let mut actual_subjects = actual.subjects.clone();
+            actual_subjects.sort();
+            let mut expected_subjects = spec.subjects.clone();
+            expected_subjects.sort();
+            if expected_subjects.is_empty()
+                || actual_subjects != expected_subjects
+                || actual.storage != jetstream::stream::StorageType::File
+                || actual.retention != jetstream::stream::RetentionPolicy::Limits
+                || actual.max_bytes <= 0
+                || actual.max_bytes > spec.max_bytes
+                || actual.max_age < spec.max_age
+                || actual.duplicate_window < spec.duplicate_window
+                || actual.num_replicas < spec.num_replicas
+                || actual.discard != jetstream::stream::DiscardPolicy::New
+            {
+                return Err(ProducerError::Configuration(
+                    "incompatible durable stream configuration".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            context,
+            stream_specs,
+            retries: config.retries(),
+            retry_backoff: Duration::from_millis(config.retry_backoff_ms()),
+        })
+    }
+
     /// 创建新的 NATS JetStream 生产者
     pub async fn new<C>(config: &C) -> Result<Self, ProducerError>
     where
@@ -151,7 +202,6 @@ impl Producer for NatsProducer {
             })
             .cloned()
             .unwrap_or_else(|| self.generate_message_id());
-        publish = publish.message_id(message_id.clone());
 
         // 准备消息头
         let mut header_map = HeaderMap::new();
@@ -171,7 +221,10 @@ impl Producer for NatsProducer {
             header_map.insert("x-message-key", k);
         }
 
-        publish = publish.headers(header_map);
+        // PublishMessage::headers replaces all headers, including the one set
+        // by message_id(). Apply the stable ID last so custom/context headers
+        // cannot remove or override JetStream's deduplication key.
+        publish = publish.headers(header_map).message_id(message_id.clone());
 
         // 发送消息并等待 JetStream ack，只有真正落到目标 stream 后才返回成功。
         // 使用稳定 message_id 后，重试不会造成重复落盘。
