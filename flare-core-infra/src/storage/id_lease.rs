@@ -12,6 +12,10 @@ use std::{
 
 const EPOCH_MS: i64 = 1_704_067_200_000;
 const RESERVATION_MS: i64 = 30_000;
+/// NTP-synchronized hosts still differ from the DB clock by milliseconds. A local
+/// clock this far behind the DB fence waits until it passes the fence instead of
+/// failing; larger skew is still rejected and no ID is ever issued before `first`.
+const MAX_FENCE_LAG_MS: i64 = 1_000;
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub enum IdLeaseError {
@@ -147,7 +151,11 @@ pub async fn acquire_id_lease(
     .map_err(|_| IdLeaseError::Unavailable)?
     .map_err(|_| IdLeaseError::Unavailable)?
     .ok_or(IdLeaseError::Unavailable)?;
-    let now = now_ms()?;
+    let mut now = now_ms()?;
+    if now < first && first - now <= MAX_FENCE_LAG_MS {
+        tokio::time::sleep(Duration::from_millis((first - now) as u64 + 1)).await;
+        now = now_ms()?;
+    }
     // A materially skewed local clock cannot start issuing under a DB fence.
     if now < first || now > until {
         return Err(IdLeaseError::Clock);
