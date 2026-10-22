@@ -2,7 +2,10 @@
 //!
 //! 约定：
 //! - 成功：返回正常响应或 `google.protobuf.Empty`
-//! - 失败：返回 `tonic::Status`，并在 `details` 中携带 `flare_proto::common::ErrorDetail`
+//! - 失败：返回 `tonic::Status`；`grpc-status-details-bin` 是标准的 `google.rpc.Status`：`code`
+//!   等于 `grpc-status`，`message` 同 `grpc-message`，结构化错误
+//!   `flare_proto::common::ErrorDetail` 作为 `details` 里的一个 `Any`（[`ERROR_DETAIL_TYPE_URL`]）。
+//!   grpc-go（grpcurl）、grpc-java 等客户端按规范校验这两处的 code 一致，不一致时只给 Internal。
 //! - `reason` 字段作为 i18n key；`message` 作为 fallback
 
 use super::{ErrorCode, FlareError, LocalizedError};
@@ -11,6 +14,32 @@ use tonic::{Code, Status};
 /// 结构化错误载荷：仅在启用 `proto` feature 时支持解析/构建 details。
 #[cfg(feature = "proto")]
 pub type ProtoErrorDetail = flare_proto::common::ErrorDetail;
+
+/// `ErrorDetail` 在 `google.rpc.Status.details` 里的 `Any.type_url`。
+#[cfg(feature = "proto")]
+pub const ERROR_DETAIL_TYPE_URL: &str = "type.googleapis.com/flare.common.v1.ErrorDetail";
+
+/// `google.rpc.Status`（`grpc-status-details-bin` 的标准载荷）。
+#[cfg(feature = "proto")]
+#[derive(Clone, PartialEq, prost::Message)]
+struct RpcStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<RpcAny>,
+}
+
+/// `google.protobuf.Any`。
+#[cfg(feature = "proto")]
+#[derive(Clone, PartialEq, prost::Message)]
+struct RpcAny {
+    #[prost(string, tag = "1")]
+    type_url: String,
+    #[prost(bytes = "vec", tag = "2")]
+    value: Vec<u8>,
+}
 
 /// 将 `FlareError` 转换为结构化 `ErrorDetail`（用于 Status details）。
 #[cfg(feature = "proto")]
@@ -26,19 +55,16 @@ pub fn ok_error_detail(track: impl Into<String>) -> ProtoErrorDetail {
     crate::error::ok_error_detail(track)
 }
 
-/// 将 `ErrorDetail` 编码为 gRPC `Status.details`（prost）。
-#[cfg(feature = "proto")]
-#[inline]
-pub fn encode_error_detail(detail: &ProtoErrorDetail) -> bytes::Bytes {
-    use prost::Message as _;
-    bytes::Bytes::from(detail.encode_to_vec())
-}
-
-/// 从 gRPC `Status.details` 解析出 `ErrorDetail`（若不是本系统编码则返回 None）。
+/// 从 gRPC `Status.details`（`google.rpc.Status`）取出 `ErrorDetail`；不是本系统编码时为 None。
 #[cfg(feature = "proto")]
 pub fn decode_error_detail(status: &Status) -> Option<ProtoErrorDetail> {
     use prost::Message as _;
-    ProtoErrorDetail::decode(status.details()).ok()
+    RpcStatus::decode(status.details())
+        .ok()?
+        .details
+        .into_iter()
+        .find(|any| any.type_url == ERROR_DETAIL_TYPE_URL)
+        .and_then(|any| ProtoErrorDetail::decode(any.value.as_slice()).ok())
 }
 
 /// 判断该 Status 是否包含本系统的结构化错误 detail。
@@ -48,15 +74,36 @@ pub fn has_error_detail(status: &Status) -> bool {
     decode_error_detail(status).is_some()
 }
 
-/// 快速构造 `tonic::Status`（携带 details(ErrorDetail)）。
+/// 构造 `tonic::Status`：`grpc-status` 为 `code`，details 是同一 `code` 的 `google.rpc.Status`，
+/// 携带 `detail`。
 #[cfg(feature = "proto")]
 pub fn build_status(code: Code, detail: ProtoErrorDetail) -> Status {
+    use prost::Message as _;
     let msg = if detail.message.is_empty() {
         detail.reason.clone()
     } else {
         detail.message.clone()
     };
-    Status::with_details(code, msg, encode_error_detail(&detail))
+    let details = RpcStatus {
+        code: code as i32,
+        message: msg.clone(),
+        details: vec![RpcAny {
+            type_url: ERROR_DETAIL_TYPE_URL.to_string(),
+            value: detail.encode_to_vec(),
+        }],
+    }
+    .encode_to_vec();
+    Status::with_details(code, msg, details.into())
+}
+
+/// 换一个 gRPC 状态码重发同一个错误：`grpc-status` 与 details 里的 `code` 一起换，`ErrorDetail`
+/// 与说明不变。没有本系统 details 的 Status 只换状态码。
+#[cfg(feature = "proto")]
+pub fn with_code(status: Status, code: Code) -> Status {
+    match decode_error_detail(&status) {
+        Some(detail) => build_status(code, detail),
+        None => Status::new(code, status.message()),
+    }
 }
 
 /// 内部错误码 → gRPC Code 映射（与 ErrorCode 语义对齐）。
@@ -114,18 +161,18 @@ fn map_error_code_to_grpc(code: ErrorCode) -> Code {
 }
 
 impl From<FlareError> for Status {
+    #[cfg(feature = "proto")]
     fn from(err: FlareError) -> Self {
-        #[cfg(feature = "proto")]
-        {
-            let (code, track) = match &err {
-                FlareError::Localized { code, .. } => (map_error_code_to_grpc(*code), ""),
-                FlareError::System(_) => (Code::Internal, ""),
-                FlareError::Io(_) => (Code::Unavailable, ""),
-            };
-            return build_status(code, to_error_detail(&err, track));
-        }
+        let (code, track) = match &err {
+            FlareError::Localized { code, .. } => (map_error_code_to_grpc(*code), ""),
+            FlareError::System(_) => (Code::Internal, ""),
+            FlareError::Io(_) => (Code::Unavailable, ""),
+        };
+        build_status(code, to_error_detail(&err, track))
+    }
 
-        #[cfg(not(feature = "proto"))]
+    #[cfg(not(feature = "proto"))]
+    fn from(err: FlareError) -> Self {
         match err {
             FlareError::Localized {
                 code,
@@ -244,4 +291,78 @@ macro_rules! grpc_internal {
     ($biz_code:expr, $reason:expr, $message:expr) => {
         $crate::grpc_err!(tonic::Code::Internal, $biz_code, $reason, $message, "")
     };
+}
+
+#[cfg(all(test, feature = "proto"))]
+mod tests {
+    use super::*;
+    use prost::Message as _;
+
+    fn detail() -> ProtoErrorDetail {
+        ProtoErrorDetail {
+            code: ErrorCode::InvalidParameter as i32,
+            reason: "SYNC_SEND_UNSUPPORTED".into(),
+            message: "sync persisted send is not supported".into(),
+            track: String::new(),
+        }
+    }
+
+    /// What grpc-go and grpc-java check: the details are a `google.rpc.Status` with the same code
+    /// and message as the status itself.
+    #[test]
+    fn details_are_a_google_rpc_status_matching_the_status() {
+        let status = build_status(Code::InvalidArgument, detail());
+        let rpc = RpcStatus::decode(status.details()).unwrap();
+        assert_eq!(rpc.code, Code::InvalidArgument as i32);
+        assert_eq!(rpc.code, status.code() as i32);
+        assert_eq!(rpc.message, status.message());
+        assert_eq!(rpc.details.len(), 1);
+        assert_eq!(rpc.details[0].type_url, ERROR_DETAIL_TYPE_URL);
+        assert_eq!(decode_error_detail(&status), Some(detail()));
+        assert!(has_error_detail(&status));
+    }
+
+    #[test]
+    fn every_flare_error_carries_consistent_details() {
+        for err in [
+            FlareError::localized(ErrorCode::OperationNotSupported, "OPERATION_NOT_SUPPORTED"),
+            FlareError::localized(ErrorCode::PermissionDenied, "FORBIDDEN"),
+            FlareError::system("boom"),
+            FlareError::io("down"),
+        ] {
+            let status = Status::from(err);
+            let rpc = RpcStatus::decode(status.details()).unwrap();
+            assert_eq!(rpc.code, status.code() as i32, "{status:?}");
+            assert!(decode_error_detail(&status).is_some());
+        }
+    }
+
+    #[test]
+    fn a_new_code_moves_both_the_status_and_its_details() {
+        let status = with_code(
+            build_status(Code::Unknown, detail()),
+            Code::FailedPrecondition,
+        );
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert_eq!(
+            RpcStatus::decode(status.details()).unwrap().code,
+            Code::FailedPrecondition as i32
+        );
+        assert_eq!(decode_error_detail(&status), Some(detail()));
+        let plain = with_code(Status::unknown("plain"), Code::Unavailable);
+        assert_eq!(
+            (plain.code(), plain.message()),
+            (Code::Unavailable, "plain")
+        );
+        assert!(plain.details().is_empty());
+    }
+
+    #[test]
+    fn foreign_or_bare_details_carry_no_error_detail() {
+        assert_eq!(decode_error_detail(&Status::internal("plain")), None);
+        // The bare `ErrorDetail` bytes of the old encoding are no `google.rpc.Status` with an
+        // `ErrorDetail` inside.
+        let bare = Status::with_details(Code::Unknown, "x", detail().encode_to_vec().into());
+        assert_eq!(decode_error_detail(&bare), None);
+    }
 }

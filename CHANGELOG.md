@@ -21,6 +21,14 @@
   分别编码。升级前登记的令牌不在新的用户集合里，`revoke_user` 撤不到它们，只能等其
   自然过期；升级前写下的单个令牌撤销位仍然生效（见下方“修复”）。（bf15224）
 - `discovery::discover::ChannelService::new` 增加 `Endpoint` 参数。（c143f19）
+- gRPC 错误的 `grpc-status-details-bin` 改为标准的 `google.rpc.Status`：`code` 与
+  `grpc-status` 相同，`message` 同 `grpc-message`，`ErrorDetail` 放在 `details` 里的
+  `Any`（`ERROR_DETAIL_TYPE_URL`）。以前这里直接是 `ErrorDetail` 的字节，grpc-go
+  （grpcurl）、grpc-java 按规范把它当成 `google.rpc.Status` 解析，读到的 code 是业务码
+  （如 9002），与 `grpc-status` 不一致，只给调用方 `Internal`。`build_status`、
+  `From<FlareError> for Status` 与 `decode_error_detail` 一起换，收发两端须同时升级；
+  直接用 `ErrorDetail::decode(status.details())` 的调用方改用 `decode_error_detail`。
+  去掉了只编码 `ErrorDetail` 的 `encode_error_detail`。
 
 ### 安全
 
@@ -90,6 +98,9 @@
   开头），不新增变体，调用方对 `AuthError` 的穷举匹配不受影响。
   `CompositeTokenValidator::is_expired` 判断令牌是否只是过期（主 TokenService 或受信 issuer
   能验过签名，撤销照查），`CoreJwtTokenValidator` 据此给出过期结论。
+- `error::grpc::with_code(status, code)`：换一个 gRPC 状态码重发同一个错误，`grpc-status`
+  与 details 里的 code 一起换，`ErrorDetail` 不变（例如把 PreSend 策略拒绝改回
+  `FAILED_PRECONDITION`）。
 
 ### 修复
 
