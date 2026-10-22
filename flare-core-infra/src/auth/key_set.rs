@@ -37,6 +37,9 @@ pub mod kid {
     pub const ADMIN_GATEWAY: &str = "admin-gateway";
     /// The Core Platform API machine sender; never resolved by a legacy Cell key.
     pub const API_GATEWAY: &str = "api-gateway";
+    /// Core Capability posting a plugin card on behalf of the ticket's user; never resolved by a
+    /// legacy Cell key.
+    pub const CAPABILITY: &str = "capability";
 }
 
 /// Key ids are short ASCII names: letters, digits, `_` and `-`, at most 32 bytes.
@@ -205,11 +208,11 @@ impl KeySet {
     }
 
     /// The key for a token header: no kid is the legacy key; an unknown kid resolves only in the
-    /// single-key deployment, except the independent Platform machine identity.
+    /// single-key deployment, except the independent machine identities (Platform API, Capability).
     pub(crate) fn resolve(&self, kid: Option<&str>) -> Option<&DecodingKey> {
         match kid {
             None => self.keys.get(LEGACY_KID),
-            Some(kid::API_GATEWAY) => self.keys.get(kid::API_GATEWAY),
+            Some(machine @ (kid::API_GATEWAY | kid::CAPABILITY)) => self.keys.get(machine),
             Some(kid) => self
                 .keys
                 .get(kid)
@@ -257,10 +260,12 @@ mod tests {
         assert_eq!(set.kids(), vec![LEGACY_KID]);
         assert!(set.resolve(None).is_some());
         assert!(set.resolve(Some("gateway")).is_some());
-        assert!(
-            set.resolve(Some(kid::API_GATEWAY)).is_none(),
-            "machine writes cannot borrow the legacy key"
-        );
+        for machine in [kid::API_GATEWAY, kid::CAPABILITY] {
+            assert!(
+                set.resolve(Some(machine)).is_none(),
+                "machine writes cannot borrow the legacy key: {machine}"
+            );
+        }
         set.insert("hook", &public_pem(2)).unwrap();
         assert!(!set.is_single_key());
         assert!(set.resolve(Some("hook")).is_some());
@@ -278,6 +283,9 @@ mod tests {
         set.insert(kid::API_GATEWAY, &public_pem(2)).unwrap();
         assert!(set.resolve(Some(kid::API_GATEWAY)).is_some());
         assert!(!set.is_single_key());
+        assert!(set.resolve(Some(kid::CAPABILITY)).is_none());
+        set.insert(kid::CAPABILITY, &public_pem(3)).unwrap();
+        assert!(set.resolve(Some(kid::CAPABILITY)).is_some());
     }
 
     #[test]
