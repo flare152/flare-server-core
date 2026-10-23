@@ -9,6 +9,7 @@ pub mod issuer;
 pub mod key_set;
 pub mod principal;
 pub mod provider;
+pub mod stated_reason;
 pub mod store;
 pub mod token;
 pub mod trusted_proxy;

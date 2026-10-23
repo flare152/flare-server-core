@@ -283,6 +283,11 @@ pub struct SignedContextIdentity {
     pub perm_version: Option<u64>,
     /// Trace id of the originating request, for log correlation only; never identity.
     pub trace_id: Option<String>,
+    /// Staff only: the reason the staff member stated for this request (`x-audit-reason`, decoded),
+    /// a [`stated_reason`](super::stated_reason::stated_reason) as it trims it: at most 512 bytes,
+    /// visible, without control, format or separator characters. Receivers that audit the
+    /// request record it.
+    pub reason: Option<String>,
 }
 
 impl SignedContextIdentity {
@@ -303,6 +308,7 @@ impl SignedContextIdentity {
             permission: None,
             perm_version: None,
             trace_id: None,
+            reason: None,
         }
     }
 
@@ -323,6 +329,12 @@ impl SignedContextIdentity {
         self.org_id = org_id;
         self.permission = permission;
         self.perm_version = Some(perm_version);
+        self
+    }
+
+    /// The reason the staff member stated; only a Staff context may carry one.
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
         self
     }
 
@@ -353,8 +365,15 @@ impl SignedContextIdentity {
                     .permission
                     .as_deref()
                     .is_none_or(|code| valid(code, 128))
+                && self
+                    .reason
+                    .as_deref()
+                    .is_none_or(|reason| super::stated_reason::stated_reason(reason) == Ok(reason))
         } else {
-            self.org_id.is_none() && self.permission.is_none() && self.perm_version.is_none()
+            self.org_id.is_none()
+                && self.permission.is_none()
+                && self.perm_version.is_none()
+                && self.reason.is_none()
         };
         if !valid(&self.actor_id, 256)
             || !tenant_ok
@@ -404,6 +423,9 @@ pub struct SignedContextClaims {
     /// Trace id of the originating request (v4 R3-1); correlation only, never identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Staff only: the stated reason ([`SignedContextIdentity::reason`]); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Key id the token was verified with: the JWT `kid` header, [`LEGACY_KID`] when absent.
     /// Filled by the verifier; never part of the signed payload.
     #[serde(skip)]
@@ -423,6 +445,7 @@ impl SignedContextClaims {
             permission: self.permission.clone(),
             perm_version: self.perm_version,
             trace_id: self.trace_id.clone(),
+            reason: self.reason.clone(),
         }
         .validate()?;
         if self.sub != self.actor_id
@@ -501,6 +524,7 @@ impl SignedContextSigner {
             permission: identity.permission.clone(),
             perm_version: identity.perm_version,
             trace_id: identity.trace_id.clone(),
+            reason: identity.reason.clone(),
             kid: String::new(),
         };
         let mut header = Header::new(Algorithm::EdDSA);
@@ -1380,6 +1404,60 @@ mod tests {
                 .verify(&hook.sign(&staff("core:users:kick")).unwrap())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_staff_reason_is_signed_bounded_and_staff_only() {
+        let (signer, verifier) = signed_context_services();
+        let reason = "清理违规内容 ticket-9";
+        let claims = verifier
+            .verify(
+                &signer
+                    .sign(&staff("core:users:kick").with_reason(reason))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(claims.reason.as_deref(), Some(reason));
+        let without = verifier
+            .verify(&signer.sign(&staff("core:users:kick")).unwrap())
+            .unwrap();
+        assert_eq!(without.reason, None);
+        let longest = "r".repeat(super::super::stated_reason::MAX_STATED_REASON_BYTES);
+        assert!(
+            signer
+                .sign(&staff("core:users:kick").with_reason(longest.clone()))
+                .is_ok()
+        );
+        for bad in [
+            format!("{longest}r"),
+            " ".into(),
+            "a\nb".into(),
+            String::new(),
+            " padded ".into(),
+            "refund \u{202E}001".into(),
+            "\u{200B}".into(),
+            "a\u{2028}b".into(),
+        ] {
+            assert!(
+                signer
+                    .sign(&staff("core:users:kick").with_reason(bad.clone()))
+                    .is_err(),
+                "{bad:?}"
+            );
+        }
+        for actor_type in [SignedActorType::User, SignedActorType::Service] {
+            assert!(
+                signer
+                    .sign(&SignedContextIdentity::new(actor_type, "a", "t", "r").with_reason("why"))
+                    .is_err(),
+                "{actor_type:?} with a reason"
+            );
+        }
+        // A forged reason on another actor type fails verification.
+        let token = changed_signed_context(&signer, |claims| {
+            claims["reason"] = serde_json::json!("forged");
+        });
+        assert!(verifier.verify(&token).is_err());
     }
 
     #[test]

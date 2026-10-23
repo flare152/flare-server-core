@@ -29,6 +29,16 @@
   `From<FlareError> for Status` 与 `decode_error_detail` 一起换，收发两端须同时升级；
   直接用 `ErrorDetail::decode(status.details())` 的调用方改用 `decode_error_detail`。
   去掉了只编码 `ErrorDetail` 的 `encode_error_detail`。
+- 签名上下文增加只有 Staff 可带的 `reason`（员工填写的操作原因，1..=512 字节、无控制
+  字符；`SignedContextIdentity::with_reason`），其他 actor 带了即拒。claims 仍是
+  `deny_unknown_fields`，带 `reason` 的令牌旧版本验不过，签发与校验两端须一起部署。
+  原因按 `auth::stated_reason` 校验：含控制字符（Cc）、格式字符（Cf，含 bidi 嵌入/覆盖/
+  隔离符与零宽字符）或行/段分隔符（U+2028/2029）即拒，不做替换；去掉首尾空白后没有可见
+  字符视为未填写；签进上下文的是去掉首尾空白后的文本。
+- Core 管理路由表的插件管理路由改为 `/plugin-admin/{plugin_id}/{permission}/query` 与
+  `/dispatch`，所需权限码是 `plugin:<plugin_id>:<permission>`
+  （`PLUGIN_ADMIN_PERMISSION_TEMPLATE`，permission 段须满足
+  `valid_plugin_permission`），不再是固定的 `plugin:<plugin_id>:admin`。
 
 ### 安全
 

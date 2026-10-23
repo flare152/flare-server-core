@@ -48,11 +48,14 @@ pub mod permission {
     ];
 }
 
-/// Template of the per-plugin staff permission `plugin:<pluginId>:admin` (the plugin protocol's
-/// `plugin_admin_permission`). A route with it requires the code built from its `{plugin_id}`
-/// parameter, see [`route_permission`]. It is not a `core:` code and not in [`permission::ALL`]:
-/// the platform grants it per plugin.
-pub const PLUGIN_ADMIN_PERMISSION_TEMPLATE: &str = "plugin:{plugin_id}:admin";
+/// Template of a plugin's staff permission `plugin:<pluginId>:<permission>` (the plugin protocol's
+/// `plugin_permission`, one of the permissions the plugin's manifest `admin` section declares). A
+/// route with it requires the code built from its `{plugin_id}` and `{permission}` parameters, see
+/// [`route_permission`]; whether that is the code the called operation declares is checked where
+/// the manifest is known. It is not a `core:` code and not in [`permission::ALL`]: the platform
+/// grants it per application, from that application's installation of the plugin, so the admin
+/// partition authorizes it for the application in the path.
+pub const PLUGIN_ADMIN_PERMISSION_TEMPLATE: &str = "plugin:{plugin_id}:{permission}";
 /// Permission codes are at most this long across the signed context, the platform catalog and audit.
 pub const MAX_PERMISSION_CODE_BYTES: usize = 128;
 
@@ -169,15 +172,16 @@ pub const ROUTES: &[CoreAdminRoute] = &[
     read("GET", "/medias/bucket", MEDIAS_READ),
     write("POST", "/medias/cleanup-orphaned-assets", MEDIAS_WRITE),
     write("POST", "/medias/object-acl", MEDIAS_WRITE),
-    // Plugin admin pages (Capability `dispatch_admin`): reads (rows sources, details) and actions.
+    // Plugin admin operations (Capability `dispatch_admin`) under the staff permission they
+    // declare: reads (`query` operations) and changes (`command` operations).
     read(
         "POST",
-        "/plugin-admin/{plugin_id}/query",
+        "/plugin-admin/{plugin_id}/{permission}/query",
         PLUGIN_ADMIN_PERMISSION_TEMPLATE,
     ),
     write(
         "POST",
-        "/plugin-admin/{plugin_id}/dispatch",
+        "/plugin-admin/{plugin_id}/{permission}/dispatch",
         PLUGIN_ADMIN_PERMISSION_TEMPLATE,
     ),
 ];
@@ -212,10 +216,22 @@ pub fn resolve(method: &str, path: &str) -> Option<&'static CoreAdminRoute> {
     })
 }
 
+/// Whether `value` is a plugin staff permission id: `[a-z][a-z0-9_-]{0,31}` (the plugin manifest's
+/// `admin.permissions[].id`).
+pub fn valid_plugin_permission(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 /// The permission code `route` requires for `path` (a path it resolves): its `permission`, or for a
-/// per-plugin route `plugin:<plugin_id>:admin` with the path's plugin id. `None` when the path does
-/// not match the route or the code would exceed [`MAX_PERMISSION_CODE_BYTES`]. Both ends of the admin
-/// surface sign and check this code, never the template.
+/// per-plugin route `plugin:<plugin_id>:<permission>` with the path's plugin id and permission id.
+/// `None` when the path does not match the route, the permission id is not one
+/// ([`valid_plugin_permission`]), or the code would exceed [`MAX_PERMISSION_CODE_BYTES`]. Both ends
+/// of the admin surface sign and check this code, never the template.
 pub fn route_permission(route: &CoreAdminRoute, path: &str) -> Option<String> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if !matches(route.pattern, &segments) {
@@ -224,14 +240,19 @@ pub fn route_permission(route: &CoreAdminRoute, path: &str) -> Option<String> {
     if route.permission != PLUGIN_ADMIN_PERMISSION_TEMPLATE {
         return Some(route.permission.to_owned());
     }
-    let index = route
-        .pattern
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .position(|part| part == "{plugin_id}")?;
-    let plugin_id = segments.get(index)?;
-    let code = format!("plugin:{plugin_id}:admin");
-    (!plugin_id.contains(':') && code.len() <= MAX_PERMISSION_CODE_BYTES).then_some(code)
+    let parts: Vec<&str> = route.pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let segment = |name: &str| {
+        parts
+            .iter()
+            .position(|part| *part == name)
+            .and_then(|index| segments.get(index).copied())
+    };
+    let (plugin_id, permission) = (segment("{plugin_id}")?, segment("{permission}")?);
+    let code = format!("plugin:{plugin_id}:{permission}");
+    (!plugin_id.contains(':')
+        && valid_plugin_permission(permission)
+        && code.len() <= MAX_PERMISSION_CODE_BYTES)
+        .then_some(code)
 }
 
 /// [`resolve`] with the code the route requires for this path ([`route_permission`]).
@@ -374,34 +395,56 @@ mod tests {
     }
 
     #[test]
-    fn plugin_admin_routes_require_the_plugins_own_code() {
+    fn plugin_admin_routes_require_the_plugin_permission_in_the_path() {
         let (route, code) =
-            resolve_with_permission("POST", "/plugin-admin/flare.poll/query").unwrap();
+            resolve_with_permission("POST", "/plugin-admin/flare.poll/read/query").unwrap();
         assert_eq!(route.permission, PLUGIN_ADMIN_PERMISSION_TEMPLATE);
         assert!(!route.write && !route.platform_only);
-        assert_eq!(code, "plugin:flare.poll:admin");
+        assert_eq!(code, "plugin:flare.poll:read");
         let (route, code) =
-            resolve_with_permission("POST", "plugin-admin/flare.poll/dispatch/").unwrap();
+            resolve_with_permission("POST", "plugin-admin/flare.poll/manage/dispatch/").unwrap();
         assert!(route.write && !route.platform_only);
-        assert_eq!(code, "plugin:flare.poll:admin");
+        assert_eq!(code, "plugin:flare.poll:manage");
         // Ordinary routes keep their code.
         assert_eq!(
             resolve_with_permission("GET", "/plugins").unwrap().1,
             permission::PLUGINS_READ
         );
-        // A plugin id the code cannot carry: `:` or a code over 128 bytes.
-        assert!(resolve_with_permission("POST", "/plugin-admin/a:b/query").is_none());
-        let longest = "p".repeat(MAX_PERMISSION_CODE_BYTES - "plugin::admin".len());
+        // A plugin id or permission the code cannot carry: `:`, not a permission id, or a code
+        // over 128 bytes.
+        for path in [
+            "/plugin-admin/a:b/read/query",
+            "/plugin-admin/flare.poll/Read/query",
+            "/plugin-admin/flare.poll/a:b/query",
+            "/plugin-admin/flare.poll/9read/query",
+            "/plugin-admin/flare.poll/a.b/query",
+        ] {
+            assert!(resolve_with_permission("POST", path).is_none(), "{path}");
+        }
+        let permission = "p".repeat(32);
         assert!(
-            resolve_with_permission("POST", &format!("/plugin-admin/{longest}/query")).is_some()
+            resolve_with_permission("POST", &format!("/plugin-admin/x/{permission}/query"))
+                .is_some()
         );
         assert!(
-            resolve_with_permission("POST", &format!("/plugin-admin/{longest}x/query")).is_none()
+            resolve_with_permission("POST", &format!("/plugin-admin/x/{permission}p/query"))
+                .is_none()
+        );
+        let longest = "p".repeat(MAX_PERMISSION_CODE_BYTES - "plugin::manage".len());
+        assert!(
+            resolve_with_permission("POST", &format!("/plugin-admin/{longest}/manage/query"))
+                .is_some()
+        );
+        assert!(
+            resolve_with_permission("POST", &format!("/plugin-admin/{longest}x/manage/query"))
+                .is_none()
         );
         for (method, path) in [
-            ("GET", "/plugin-admin/flare.poll/query"),
-            ("POST", "/plugin-admin/flare.poll"),
-            ("POST", "/plugin-admin//query"),
+            ("GET", "/plugin-admin/flare.poll/read/query"),
+            ("POST", "/plugin-admin/flare.poll/query"),
+            ("POST", "/plugin-admin/flare.poll/read"),
+            ("POST", "/plugin-admin//read/query"),
+            ("POST", "/plugin-admin/flare.poll//query"),
         ] {
             assert!(
                 resolve_with_permission(method, path).is_none(),
@@ -409,7 +452,7 @@ mod tests {
             );
         }
         // The route table never lets the template itself through as a code.
-        let route = resolve("POST", "/plugin-admin/flare.poll/query").unwrap();
-        assert!(route_permission(route, "/plugin-admin/other/dispatch").is_none());
+        let route = resolve("POST", "/plugin-admin/flare.poll/read/query").unwrap();
+        assert!(route_permission(route, "/plugin-admin/other/read/dispatch").is_none());
     }
 }
