@@ -283,6 +283,8 @@ pub struct SignedContextIdentity {
     pub perm_version: Option<u64>,
     /// Trace id of the originating request, for log correlation only; never identity.
     pub trace_id: Option<String>,
+    /// Authenticated User login session; never taken from untrusted metadata.
+    pub session_id: Option<String>,
     /// Staff only: the reason the staff member stated for this request (`x-audit-reason`, decoded),
     /// a [`stated_reason`](super::stated_reason::stated_reason) as it trims it: at most 512 bytes,
     /// visible, without control, format or separator characters. Receivers that audit the
@@ -308,6 +310,7 @@ impl SignedContextIdentity {
             permission: None,
             perm_version: None,
             trace_id: None,
+            session_id: None,
             reason: None,
         }
     }
@@ -315,6 +318,12 @@ impl SignedContextIdentity {
     /// Trace id to propagate (at most 128 bytes); it carries no identity.
     pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
         self.trace_id = Some(trace_id.into());
+        self
+    }
+
+    /// Bind a verified application login session to a User context.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 
@@ -384,6 +393,10 @@ impl SignedContextIdentity {
                 .as_deref()
                 .is_some_and(|id| !valid(id, 256))
             || self.trace_id.as_deref().is_some_and(|id| !valid(id, 128))
+            || self
+                .session_id
+                .as_deref()
+                .is_some_and(|id| self.actor_type != SignedActorType::User || !valid(id, 256))
             || self.roles.len() > 32
             || self.roles.iter().any(|role| !valid(role, 128))
             || (self.actor_type == SignedActorType::Guest && !self.roles.is_empty())
@@ -423,6 +436,9 @@ pub struct SignedContextClaims {
     /// Trace id of the originating request (v4 R3-1); correlation only, never identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Authenticated User login session; never taken from untrusted metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Staff only: the stated reason ([`SignedContextIdentity::reason`]); absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -445,6 +461,7 @@ impl SignedContextClaims {
             permission: self.permission.clone(),
             perm_version: self.perm_version,
             trace_id: self.trace_id.clone(),
+            session_id: self.session_id.clone(),
             reason: self.reason.clone(),
         }
         .validate()?;
@@ -524,6 +541,7 @@ impl SignedContextSigner {
             permission: identity.permission.clone(),
             perm_version: identity.perm_version,
             trace_id: identity.trace_id.clone(),
+            session_id: identity.session_id.clone(),
             reason: identity.reason.clone(),
             kid: String::new(),
         };
@@ -1525,6 +1543,37 @@ mod tests {
             });
             assert!(verifier.verify(&token).is_err(), "accepted interval");
         }
+    }
+
+    #[test]
+    fn signed_context_session_is_optional_bounded_and_user_only() {
+        let (signer, verifier) = signed_context_services();
+        let user = SignedContextIdentity::new(SignedActorType::User, "alice", "tenant-a", "req");
+        let token = signer.sign(&user).unwrap();
+        assert_eq!(verifier.verify(&token).unwrap().session_id, None);
+        let token = signer
+            .sign(&user.clone().with_session_id("session-a"))
+            .unwrap();
+        assert_eq!(
+            verifier.verify(&token).unwrap().session_id.as_deref(),
+            Some("session-a")
+        );
+        for invalid in [
+            "".to_string(),
+            " spaced ".into(),
+            "bad\nvalue".into(),
+            "x".repeat(257),
+        ] {
+            assert!(signer.sign(&user.clone().with_session_id(invalid)).is_err());
+        }
+        let service =
+            SignedContextIdentity::new(SignedActorType::Service, "worker", "tenant-a", "req");
+        assert!(signer.sign(&service.with_session_id("session-a")).is_err());
+        let forged = changed_signed_context(&signer, |claims| {
+            claims["actor_type"] = "service".into();
+            claims["session_id"] = "session-a".into();
+        });
+        assert!(verifier.verify(&forged).is_err());
     }
 
     #[test]

@@ -7,7 +7,10 @@
 
 入站只从 `x-flare-ctx` 建立身份。令牌固定 `iss=flare-internal`、
 `aud=flare-internal`、`token_use=internal_context`，最长 60 秒，携带 actor 类型、
-actor ID、租户、角色、可选 credential ID、request ID 和唯一 jti。校验包括 EdDSA
+actor ID、租户、角色、可选 credential ID、request ID 和唯一 jti。User 上下文还可携带
+已验证应用令牌的 `session_id`（最长 256 字节），用于识别当前登录设备；不得从裸
+`x-session-id` 回填。接收端只从验签声明恢复 `Context::session_id`。启用该声明前需先
+更新接收端（声明严格拒绝未知字段）。校验包括 EdDSA
 签名、issuer/audience/use、必填字段、时间区间、类型及身份约束。服务端剥离裸
 `x-actor-*`、`x-user-id`、`x-tenant-id` 等身份头。`require_ctx_from_request` 遇到
 已验证的 Context 后不再从 metadata 回填用户、租户或设备；未迁移的服务仍使用原来的

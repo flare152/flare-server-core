@@ -237,6 +237,9 @@ fn signed_context(claims: &SignedContextClaims, token: &str) -> Ctx {
     if let Some(trace_id) = &claims.trace_id {
         ctx = ctx.with_trace_id(trace_id);
     }
+    if let Some(session_id) = &claims.session_id {
+        ctx = ctx.with_session_id(session_id);
+    }
     // A TenantAdmin issuer signs the authenticated administrator's own id as
     // actor_id, and that id is also the acting user (issuers build the context
     // with user_id == actor_id and handlers record it as the operator). A Staff
@@ -403,6 +406,34 @@ mod tests {
         let merged = require_ctx_from_request(&tonic_req).unwrap();
         assert_eq!(merged.user_id(), Some("real-user"));
         assert_eq!(merged.tenant_id(), Some("real-tenant"));
+    }
+
+    #[tokio::test]
+    async fn current_session_comes_only_from_the_verified_user_claim() {
+        let (signer, verifier) = keys();
+        let identity =
+            SignedContextIdentity::new(SignedActorType::User, "alice", "tenant-a", "req")
+                .with_session_id("current-session");
+        let token = signer.sign(&identity).unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let mut service = SignedContextLayer::new(verifier).layer(ObservingService(seen.clone()));
+        let request = HttpRequest::builder()
+            .header(SIGNED_CONTEXT_HEADER, &token)
+            .header("x-session-id", "forged-session")
+            .body(Body::empty())
+            .unwrap();
+        service.call(request).await.unwrap();
+        let (ctx, _) = seen.lock().unwrap().take().unwrap();
+        assert_eq!(ctx.session_id(), Some("current-session"));
+        let mut request = Request::new(());
+        request.extensions_mut().insert(ctx);
+        request
+            .metadata_mut()
+            .insert("x-session-id", "forged-session".parse().unwrap());
+        assert_eq!(
+            require_ctx_from_request(&request).unwrap().session_id(),
+            Some("current-session")
+        );
     }
 
     #[tokio::test]
