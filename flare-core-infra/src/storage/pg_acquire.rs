@@ -101,6 +101,10 @@ struct Observation<'a> {
     finished: bool,
 }
 
+#[allow(
+    deprecated,
+    reason = "fetch_update is renamed try_update on newer toolchains, and try_update is unstable at the declared MSRV"
+)]
 fn saturating_add(counter: &AtomicU64, value: u64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(value))
