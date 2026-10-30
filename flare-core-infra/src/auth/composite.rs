@@ -106,7 +106,7 @@ impl CompositeTokenValidator {
         }
         self.trusted
             .iter()
-            .any(|trusted| trusted.decode_allow_expired(token).is_ok_and(&expired))
+            .any(|trusted| trusted.decode_allow_expired(token).is_ok_and(expired))
     }
 }
 
